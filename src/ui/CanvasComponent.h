@@ -74,6 +74,12 @@ private:
     std::atomic<float>* flashParam = nullptr;
     std::atomic<float>* intensityParam = nullptr;
     std::atomic<float>* freezeParam = nullptr;
+    std::atomic<float>* lookParam = nullptr;
+    std::array<std::atomic<float>*, 8> macroParams {};
+
+    // GL thread copy of the processor's cover palette.
+    std::optional<Palette> cover;
+    int coverVersionSeen = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CanvasComponent)
 };

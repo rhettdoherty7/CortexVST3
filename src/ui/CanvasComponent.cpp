@@ -19,6 +19,9 @@ CanvasComponent::CanvasComponent (CortexProcessor& p) : processor (p)
     flashParam     = processor.apvts.getRawParameterValue (params::id::flashLimiter);
     intensityParam = processor.apvts.getRawParameterValue (params::id::intensity);
     freezeParam    = processor.apvts.getRawParameterValue (params::id::freeze);
+    lookParam      = processor.apvts.getRawParameterValue (params::id::lookSelect);
+    for (int i = 0; i < 8; ++i)
+        macroParams[(size_t) i] = processor.apvts.getRawParameterValue (params::id::macro (i));
 
     setOpaque (true);
     context.setOpenGLVersionRequired (juce::OpenGLContext::openGL4_1);
@@ -180,9 +183,19 @@ void CanvasComponent::renderOpenGL()
         vw = juce::roundToInt (h * 16.0 / 9.0);
     }
 
+    if (const int version = processor.coverPaletteVersion(); version != coverVersionSeen)
+    {
+        coverVersionSeen = version;
+        cover = processor.coverPalette();
+    }
+
     FrameSettings settings;
     settings.flashMode = (FlashLimiter::Mode) juce::jlimit (0, 2, juce::roundToInt (flashParam->load()));
     settings.masterIntensity = intensityParam->load();
+    settings.look = juce::jlimit (0, numFactoryLooks() - 1, juce::roundToInt (lookParam->load()));
+    for (size_t i = 0; i < 8; ++i)
+        settings.macros[i] = macroParams[i]->load (std::memory_order_relaxed);
+    settings.paletteOverride = cover ? &*cover : nullptr;
 
     renderer.render (inputs, vw, vh, (GLuint) framebuffer, (w - vw) / 2, (h - vh) / 2, vw, vh, settings);
 
