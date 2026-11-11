@@ -3,21 +3,26 @@
 #include "Params.h"
 #include "Version.h"
 
+#include <engine/Scene.h>
+
 namespace cortex
 {
 
 namespace
 {
     // Palette from CLAUDE.md section 10.
-    const juce::Colour background { 0xff0b0b0f };
-    const juce::Colour panel      { 0xff14141a };
-    const juce::Colour hairline   { 0xff26262e };
-    const juce::Colour text       { 0xffe8e8ee };
-    const juce::Colour dimText    { 0xff8a8a96 };
-    const juce::Colour accent     { 0xff7c5cff };
-    const juce::Colour kickColour { 0xffff5c7a };
-    const juce::Colour snareColour{ 0xffffc857 };
-    const juce::Colour hatColour  { 0xff5ce1e6 };
+    const juce::Colour background  { 0xff0b0b0f };
+    const juce::Colour panel       { 0xff14141a };
+    const juce::Colour hairline    { 0xff26262e };
+    const juce::Colour text        { 0xffe8e8ee };
+    const juce::Colour dimText     { 0xff8a8a96 };
+    const juce::Colour accent      { 0xff7c5cff };
+    const juce::Colour warning     { 0xffff8a5c };
+    const juce::Colour kickColour  { 0xffff5c7a };
+    const juce::Colour snareColour { 0xffffc857 };
+    const juce::Colour hatColour   { 0xff5ce1e6 };
+
+    constexpr int stripHeight = 132;
 
     juce::Font uiFont (float height, bool bold = false)
     {
@@ -37,8 +42,10 @@ namespace
 }
 
 CortexEditor::CortexEditor (CortexProcessor& p)
-    : AudioProcessorEditor (p), processor (p)
+    : AudioProcessorEditor (p), processor (p), canvas (p)
 {
+    addAndMakeVisible (canvas);
+
     struct KnobSpec { const char* id; const char* name; juce::Colour colour; };
     const KnobSpec specs[] = {
         { params::id::kickSensitivity,  "Kick sens",     kickColour },
@@ -54,6 +61,7 @@ CortexEditor::CortexEditor (CortexProcessor& p)
         auto& k = knobs[i];
         k.slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         k.slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 16);
+        k.slider.setNumDecimalPlacesToDisplay (2);
         k.slider.setColour (juce::Slider::rotarySliderFillColourId, specs[i].colour);
         k.slider.setColour (juce::Slider::rotarySliderOutlineColourId, hairline);
         k.slider.setColour (juce::Slider::thumbColourId, text);
@@ -70,11 +78,16 @@ CortexEditor::CortexEditor (CortexProcessor& p)
         k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.apvts, specs[i].id, k.slider);
     }
 
+    for (auto* box : { &sourceBox, &sceneBox })
+    {
+        box->setColour (juce::ComboBox::backgroundColourId, panel);
+        box->setColour (juce::ComboBox::outlineColourId, hairline);
+        box->setColour (juce::ComboBox::textColourId, text);
+        box->setColour (juce::ComboBox::arrowColourId, dimText);
+        addAndMakeVisible (*box);
+    }
+
     sourceBox.addItemList ({ "Full Mix", "Kick", "Snare", "Hats", "Bass", "Vocal", "Synth" }, 1);
-    sourceBox.setColour (juce::ComboBox::backgroundColourId, panel);
-    sourceBox.setColour (juce::ComboBox::outlineColourId, hairline);
-    sourceBox.setColour (juce::ComboBox::textColourId, text);
-    addAndMakeVisible (sourceBox);
     sourceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, params::id::sourceType, sourceBox);
 
     sourceLabel.setText ("Source type", juce::dontSendNotification);
@@ -82,10 +95,30 @@ CortexEditor::CortexEditor (CortexProcessor& p)
     sourceLabel.setColour (juce::Label::textColourId, dimText);
     addAndMakeVisible (sourceLabel);
 
+    // Scene select is an integer parameter (1..64); only the factory scenes are listed.
+    sceneParameter = processor.apvts.getParameter (params::id::sceneSelect);
+    for (int i = 0; i < numFactoryScenes(); ++i)
+        sceneBox.addItem (factoryScene (i).name, i + 1);
+    sceneBox.onChange = [this]
+    {
+        const int id = sceneBox.getSelectedId();
+        if (id > 0 && sceneParameter != nullptr)
+        {
+            sceneParameter->beginChangeGesture();
+            sceneParameter->setValueNotifyingHost (sceneParameter->convertTo0to1 ((float) id));
+            sceneParameter->endChangeGesture();
+        }
+    };
+
     setOpaque (true);
     setResizable (true, true);
     setResizeLimits (900, 560, 2400, 1600);
-    setSize (900, 560);
+    setSize (1100, 700);
+
+    // Diagnostics: CORTEX_STATS_LOG=<file> appends the frame rate and GPU time once a second.
+    const auto logPath = juce::SystemStats::getEnvironmentVariable ("CORTEX_STATS_LOG", {});
+    if (juce::File::isAbsolutePath (logPath))
+        statsLog = juce::File (logPath);
 
     processor.setAnalysisActive (true);
     startTimerHz (60);
@@ -99,17 +132,48 @@ CortexEditor::~CortexEditor()
 
 void CortexEditor::timerCallback()
 {
-    // Drain everything queued since the last tick; keep the newest frame but never lose a hit.
-    AnalysisFrame next;
     bool kick = false, snare = false, hat = false, any = false;
 
-    while (processor.popFrame (next))
+    if (canvas.isRendering())
     {
-        kick  = kick  || next.kickHit;
-        snare = snare || next.snareHit;
-        hat   = hat   || next.hatHit;
-        frame = next;
-        any = true;
+        const auto snap = canvas.takeSnapshot();
+        if (snap.gotFrame)
+        {
+            frame = snap.frame;
+            any = true;
+        }
+        kick = snap.kickHit;
+        snare = snap.snareHit;
+        hat = snap.hatHit;
+        errorText = snap.error;
+
+        statusText = juce::String (juce::roundToInt (snap.framesPerSecond)) + " fps  |  "
+                   + juce::String (snap.stats.gpuMs, 2) + " ms GPU";
+
+        if (statsLog != juce::File() && ++statsTicks >= 60)
+        {
+            statsTicks = 0;
+            statsLog.appendText (juce::String (snap.framesPerSecond, 1) + " fps, " + juce::String (snap.stats.gpuMs, 3)
+                                 + " ms GPU, scale " + juce::String (snap.stats.renderScale, 2) + juce::newLine);
+        }
+
+        if (snap.stats.renderScale < 0.99f)
+            statusText << "  |  " << juce::roundToInt (snap.stats.renderScale * 100.0f) << "% res";
+        if (snap.stats.limiterGain < 0.99f)
+            statusText << "  |  flash limiter active";
+    }
+    else
+    {
+        processor.drainFrames ([&] (const AnalysisFrame& f)
+        {
+            kick = kick || f.kickHit;
+            snare = snare || f.snareHit;
+            hat = hat || f.hatHit;
+            frame = f;
+            any = true;
+        });
+        errorText = canvas.takeSnapshot().error;
+        statusText = "visuals off";
     }
 
     hasFrame = hasFrame || any;
@@ -121,46 +185,59 @@ void CortexEditor::timerCallback()
 
     if (! any)
     {
-        // No audio callback is running (transport stopped in some hosts): let the meters fall.
+        // Transport stopped in some hosts means no audio callbacks: let the meters fall.
         frame.kick *= 0.9f;
         frame.snare *= 0.9f;
         frame.hat *= 0.9f;
+        for (auto& b : frame.bands)
+            b *= 0.95f;
     }
 
-    repaint();
+    if (sceneParameter != nullptr)
+    {
+        const int id = juce::roundToInt (sceneParameter->convertFrom0to1 (sceneParameter->getValue()));
+        if (sceneBox.getSelectedId() != id)
+            sceneBox.setSelectedId (id, juce::dontSendNotification);
+    }
+
+    repaint (titleArea);
+    repaint (lightsArea);
+    repaint (bandsArea);
 }
 
 void CortexEditor::resized()
 {
     auto area = getLocalBounds().reduced (12);
-    area.removeFromTop (28);   // title bar
 
-    auto controls = area.removeFromBottom (118);
-    area.removeFromBottom (10);
+    titleArea = area.removeFromTop (28);
+    {
+        auto title = titleArea;
+        sceneBox.setBounds (title.removeFromRight (200).reduced (0, 2));
+    }
+    area.removeFromTop (8);
 
-    auto top = area.removeFromTop (area.getHeight() * 3 / 5);
-    area.removeFromTop (10);
+    stripArea = area.removeFromBottom (stripHeight);
+    area.removeFromBottom (8);
+    canvas.setBounds (area);
 
-    lightsArea = top.removeFromLeft (150);
-    top.removeFromLeft (10);
-    spectrumArea = top;
+    auto strip = stripArea;
+    lightsArea = strip.removeFromLeft (230);
+    strip.removeFromLeft (8);
+    bandsArea = strip.removeFromLeft (250);
+    strip.removeFromLeft (8);
 
-    bandsArea = area.removeFromLeft (area.getWidth() / 3);
-    area.removeFromLeft (10);
-    readoutArea = area.removeFromRight (190);
-    area.removeFromRight (10);
-    scopeArea = area;
-
-    auto sourceColumn = controls.removeFromLeft (170).reduced (10, 22);
+    auto controls = strip;
+    auto sourceColumn = controls.removeFromLeft (160).reduced (10, 24);
     sourceLabel.setBounds (sourceColumn.removeFromTop (16));
     sourceColumn.removeFromTop (4);
     sourceBox.setBounds (sourceColumn.removeFromTop (26));
 
+    controls.removeFromTop (18);
     const int knobWidth = controls.getWidth() / (int) knobs.size();
     for (auto& k : knobs)
     {
-        auto cell = controls.removeFromLeft (knobWidth).reduced (4, 6);
-        k.label.setBounds (cell.removeFromTop (16));
+        auto cell = controls.removeFromLeft (knobWidth).reduced (2, 4);
+        k.label.setBounds (cell.removeFromTop (14));
         k.slider.setBounds (cell);
     }
 }
@@ -169,44 +246,46 @@ void CortexEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
 
-    auto titleBar = getLocalBounds().reduced (12).removeFromTop (28).toFloat();
+    // Title bar
+    auto title = titleArea.toFloat();
     g.setColour (text);
     g.setFont (uiFont (15.0f, true));
-    g.drawText ("CORTEX", titleBar, juce::Justification::centredLeft);
+    g.drawText ("CORTEX", title.removeFromLeft (90.0f), juce::Justification::centredLeft);
     g.setColour (dimText);
     g.setFont (uiFont (11.0f));
-    g.drawText (juce::String ("analysis debug view  v") + versionString, titleBar, juce::Justification::centredRight);
+    g.drawText (juce::String ("v") + versionString, title.removeFromLeft (60.0f), juce::Justification::centredLeft);
+    title.removeFromRight (212.0f);
+    g.drawText (statusText + "    " + juce::String (frame.bpm, 1) + " BPM", title, juce::Justification::centredRight);
 
+    // Bottom strip
     const auto lights = lightsArea.toFloat();
     drawPanel (g, lights, "ONSETS");
-    auto lightColumn = lights.reduced (10.0f, 24.0f);
-    const float cell = lightColumn.getHeight() / 3.0f;
-    const auto kickCell  = lightColumn.removeFromTop (cell);
-    const auto snareCell = lightColumn.removeFromTop (cell);
-    drawHitLight (g, kickCell, "KICK", kickColour, frame.kick, kickFlash);
-    drawHitLight (g, snareCell, "SNARE", snareColour, frame.snare, snareFlash);
-    drawHitLight (g, lightColumn, "HAT", hatColour, frame.hat, hatFlash);
-
-    drawPanel (g, spectrumArea.toFloat(), "SPECTRUM  20 Hz - 20 kHz");
-    drawSpectrum (g, spectrumArea.toFloat().reduced (10.0f, 24.0f));
+    auto row = lights.reduced (10.0f, 22.0f);
+    const float cell = row.getWidth() / 3.0f;
+    drawHitLight (g, row.removeFromLeft (cell), "KICK", kickColour, frame.kick, kickFlash);
+    drawHitLight (g, row.removeFromLeft (cell), "SNARE", snareColour, frame.snare, snareFlash);
+    drawHitLight (g, row, "HAT", hatColour, frame.hat, hatFlash);
 
     drawPanel (g, bandsArea.toFloat(), "BANDS");
     drawBands (g, bandsArea.toFloat().reduced (10.0f, 24.0f));
 
-    drawPanel (g, scopeArea.toFloat(), "SCOPE");
-    drawScope (g, scopeArea.toFloat().reduced (10.0f, 24.0f));
+    drawPanel (g, stripArea.toFloat().withLeft ((float) bandsArea.getRight() + 8.0f), "DETECTORS");
 
-    drawPanel (g, readoutArea.toFloat(), "READOUT");
-    drawReadout (g, readoutArea.toFloat().reduced (10.0f, 24.0f));
-
-    auto controls = getLocalBounds().reduced (12).removeFromBottom (118).toFloat();
-    drawPanel (g, controls, "DETECTORS");
+    if (errorText.isNotEmpty())
+    {
+        auto box = canvas.getBounds().toFloat().reduced (24.0f).removeFromBottom (90.0f);
+        g.setColour (panel.withAlpha (0.92f));
+        g.fillRoundedRectangle (box, 8.0f);
+        g.setColour (warning);
+        g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::plain)));
+        g.drawFittedText (errorText, box.reduced (12.0f).toNearestInt(), juce::Justification::topLeft, 6);
+    }
 }
 
 void CortexEditor::drawHitLight (juce::Graphics& g, juce::Rectangle<float> area, const juce::String& label,
                                  juce::Colour colour, float envelope, float flash) const
 {
-    const float size = juce::jmin (area.getHeight() - 22.0f, area.getWidth() - 20.0f, 64.0f);
+    const float size = juce::jmin (area.getHeight() - 20.0f, area.getWidth() - 12.0f, 56.0f);
     const auto circle = juce::Rectangle<float> (size, size).withCentre ({ area.getCentreX(), area.getY() + size * 0.5f + 2.0f });
 
     g.setColour (colour.withAlpha (0.12f));
@@ -221,26 +300,15 @@ void CortexEditor::drawHitLight (juce::Graphics& g, juce::Rectangle<float> area,
     }
 
     g.setColour (dimText);
-    g.setFont (uiFont (11.0f));
+    g.setFont (uiFont (10.0f));
     g.drawText (label, area.withTop (circle.getBottom() + 2.0f), juce::Justification::centredTop);
-}
-
-void CortexEditor::drawSpectrum (juce::Graphics& g, juce::Rectangle<float> area) const
-{
-    const float barWidth = area.getWidth() / 128.0f;
-    for (int i = 0; i < 128; ++i)
-    {
-        const float h = frame.spectrum[i] * area.getHeight();
-        g.setColour (accent.withAlpha (0.35f + 0.65f * frame.spectrum[i]));
-        g.fillRect (area.getX() + (float) i * barWidth, area.getBottom() - h, juce::jmax (1.0f, barWidth - 1.0f), h);
-    }
 }
 
 void CortexEditor::drawBands (juce::Graphics& g, juce::Rectangle<float> area) const
 {
-    static const char* const names[8] = { "SUB", "BASS", "LO-MID", "MID", "HI-MID", "PRES", "BRIL", "AIR" };
+    static const char* const names[8] = { "SUB", "BASS", "LO-M", "MID", "HI-M", "PRES", "BRIL", "AIR" };
     const float cellWidth = area.getWidth() / 8.0f;
-    auto bars = area.withTrimmedBottom (16.0f);
+    auto bars = area.withTrimmedBottom (14.0f);
 
     g.setFont (uiFont (9.0f));
     for (int i = 0; i < 8; ++i)
@@ -253,52 +321,6 @@ void CortexEditor::drawBands (juce::Graphics& g, juce::Rectangle<float> area) co
         g.setColour (dimText);
         g.drawText (names[i], juce::Rectangle<float> (column.getX() - 3.0f, bars.getBottom() + 2.0f, cellWidth, 12.0f), juce::Justification::centred);
     }
-}
-
-void CortexEditor::drawScope (juce::Graphics& g, juce::Rectangle<float> area) const
-{
-    const auto trace = [&] (const float* wave, juce::Colour colour)
-    {
-        juce::Path path;
-        for (int i = 0; i < 256; ++i)
-        {
-            const float x = area.getX() + area.getWidth() * (float) i / 255.0f;
-            const float y = area.getCentreY() - juce::jlimit (-1.0f, 1.0f, wave[i]) * area.getHeight() * 0.5f;
-            if (i == 0) path.startNewSubPath (x, y); else path.lineTo (x, y);
-        }
-        g.setColour (colour);
-        g.strokePath (path, juce::PathStrokeType (1.2f));
-    };
-
-    g.setColour (hairline);
-    g.drawHorizontalLine ((int) area.getCentreY(), area.getX(), area.getRight());
-    trace (frame.waveR, hatColour.withAlpha (0.6f));
-    trace (frame.waveL, accent);
-}
-
-void CortexEditor::drawReadout (juce::Graphics& g, juce::Rectangle<float> area) const
-{
-    const auto db = [] (float linear) { return juce::Decibels::gainToDecibels (linear, -100.0f); };
-
-    juce::StringArray lines;
-    lines.add ("BPM      " + juce::String (frame.bpm, 1));
-    lines.add ("PPQ      " + (frame.ppq >= 0.0 ? juce::String (frame.ppq, 2) : juce::String ("stopped")));
-    lines.add ("Beat     " + juce::String (frame.beatPhase, 2) + "   Bar " + juce::String (frame.barPhase, 2));
-    lines.add ("RMS      " + juce::String (db (frame.rms), 1) + " dB");
-    lines.add ("Peak     " + juce::String (db (frame.peak), 1) + " dB");
-    lines.add ("LUFS-S   " + juce::String (frame.lufsShort, 1));
-    lines.add ("Flux     " + juce::String (frame.flux, 2));
-    lines.add ("Bright   " + juce::String (frame.centroid, 2));
-    lines.add ("Width    " + juce::String (frame.stereoWidth, 2) + "   Corr " + juce::String (frame.correlation, 2));
-    lines.add ("Pitch    " + (frame.pitchConf > 0.0f ? juce::String (frame.pitchHz, 1) + " Hz" : juce::String ("-")));
-    if (! hasFrame)
-        lines.add ("waiting for audio...");
-
-    g.setColour (text);
-    g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 12.0f, juce::Font::plain)));
-    const float lineHeight = juce::jmin (16.0f, area.getHeight() / (float) lines.size());
-    for (const auto& line : lines)
-        g.drawText (line, area.removeFromTop (lineHeight), juce::Justification::centredLeft);
 }
 
 } // namespace cortex

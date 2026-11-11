@@ -22,7 +22,17 @@ public:
     // --- Analysis consumer API (one consumer at a time: the editor / render thread) ------------
     /** Analysis only runs while someone is reading it. Call with true when a consumer attaches. */
     void setAnalysisActive (bool shouldRun) noexcept   { analysisRequested.store (shouldRun, std::memory_order_release); }
-    bool popFrame (AnalysisFrame& out) noexcept        { return frames.pop (out); }
+
+    /** Hands every queued frame to `fn`, oldest first. Safe to call from more than one thread
+        (the editor's timer and the GL thread): consumers take turns; the audio thread never waits. */
+    template <typename Fn>
+    void drainFrames (Fn&& fn)
+    {
+        const juce::SpinLock::ScopedLockType lock (consumerLock);
+        AnalysisFrame frame;
+        while (frames.pop (frame))
+            fn (frame);
+    }
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -56,6 +66,7 @@ private:
     AnalysisEngine engine;
     SpscFifo<AnalysisFrame> frames { 64 };
     std::atomic<bool> analysisRequested { false };
+    juce::SpinLock consumerLock;   // consumers only; the audio thread never takes it
     bool analysisRunning = false;   // audio thread only
 
     std::atomic<float>* sourceType = nullptr;
