@@ -140,7 +140,27 @@ struct Renderer::LiveWidget
     std::unique_ptr<Module> module;
     WidgetSpec spec;
     gfx::RenderTarget target;
+
+    WidgetSettings current;                  // spec settings after modulation, this frame
+    std::vector<LayerSpec> layersCurrent;    // same size as spec.layers
+    LayerChain chain;
+    GLuint output = 0;                       // what gets composited: the target, or its last layer
+    float clock = 0.0f, motion = 0.0f;
 };
+
+void Renderer::LayerChain::prepare (size_t layerCount)
+{
+    history.clear();
+    for (size_t i = 0; i < layerCount; ++i)
+        history.push_back (std::make_unique<gfx::RenderTarget>());
+}
+
+void Renderer::LayerChain::release()
+{
+    for (auto& t : pingPong)
+        t.release();
+    history.clear();
+}
 
 Renderer::Renderer() = default;
 
@@ -211,6 +231,11 @@ bool Renderer::init (std::string& log)
     if (copyShader == nullptr || downShader == nullptr || upShader == nullptr || presentShader == nullptr)
         return false;
 
+    for (int t = 0; t < (int) LayerType::count; ++t)
+        if (const char* file = layerShaderFile ((LayerType) t))
+            if ((layerShaders[(size_t) t] = program ("fullscreen.vert.glsl", file, log)) == nullptr)
+                return false;
+
     spectrumTex.ensure (128, 1);
     waveTex.ensure (256, 2);
     waveHistoryTex.ensure (256, historyRows);
@@ -242,8 +267,11 @@ bool Renderer::init (std::string& log)
 void Renderer::shutdown()
 {
     widgets.clear();
+    globalChain.release();
+    loadedLook = -1;
     programs.clear();
     copyShader = downShader = upShader = presentShader = nullptr;
+    layerShaders = {};
 
     for (auto* t : { &spectrumTex, &waveTex, &waveHistoryTex, &spectrumHistoryTex, &noiseTex })
         t->release();
@@ -290,13 +318,20 @@ bool Renderer::loadScene (const SceneSpec& spec, std::string& log)
         if (! live->module->init (*this, log))
             return false;
 
+        live->current = w.settings;
+        live->layersCurrent = w.layers;
+        live->chain.prepare (w.layers.size());
         widgets.push_back (std::move (live));
     }
 
-    background = factoryPalette (spec.backgroundPalette).linear (5);
+    auto routes = spec.routes;
+    routes.insert (routes.end(), macroRoutes().begin(), macroRoutes().end());
+    router.setRoutes (std::move (routes));
+
+    backgroundPalette = spec.backgroundPalette;
     tonemap = spec.tonemap;
-    exposure = spec.exposure;
-    bloomStrength = spec.bloom;
+    exposureBase = exposure = spec.exposure;
+    bloomBase = bloomStrength = spec.bloom;
     return true;
 }
 
@@ -306,7 +341,7 @@ void Renderer::bindCommon (gfx::Shader& s, const WidgetSettings& w, int width, i
 {
     const auto& i = *in;
 
-    s.set ("uTime", i.time * w.speed);
+    s.set ("uTime", w.clock);
     s.set ("uDt", i.dt * w.speed);
     s.set ("uRes", (float) width, (float) height);
     s.set ("uKick", i.kick);
@@ -329,10 +364,10 @@ void Renderer::bindCommon (gfx::Shader& s, const WidgetSettings& w, int width, i
     s.set ("uKickCount", i.kickCount);
     s.set ("uSnareCount", i.snareCount);
     s.set ("uHatCount", i.hatCount);
-    s.set ("uMotion", i.motion * w.speed);
+    s.set ("uMotion", w.motionClock);
     s.set ("uHistoryPhase", historyPhase);
 
-    const auto& pal = factoryPalette (w.palette);
+    const auto& pal = paletteFor (w);
     float linear[18], lab[18];
     for (int c = 0; c < 6; ++c)
     {
@@ -412,9 +447,8 @@ void Renderer::updateDataTextures (const RenderInputs& i) noexcept
     spectrumHistoryTex.upload (spectrumHistoryStaging.data());
 }
 
-void Renderer::renderBloom (int width, int height) noexcept
+void Renderer::renderBloom (GLuint source, int width, int height) noexcept
 {
-    GLuint source = sceneTarget.texture();
     int sourceW = width, sourceH = height;
 
     downShader->use();
@@ -426,6 +460,7 @@ void Renderer::renderBloom (int width, int height) noexcept
         downShader->setTexture ("uSource", 4, source);
         downShader->set ("uTexel", 1.0f / (float) sourceW, 1.0f / (float) sourceH);
         downShader->set ("uFirst", i == 0 ? 1 : 0);
+        downShader->set ("uThreshold", bloomThreshold);
         dev.drawFullscreen();
         source = bloom[(size_t) i].texture();
         sourceW = w;
@@ -448,7 +483,7 @@ void Renderer::renderBloom (int width, int height) noexcept
 void Renderer::present (int measure, const FrameSettings&) noexcept
 {
     presentShader->use();
-    presentShader->setTexture ("uScene", 4, sceneTarget.texture());
+    presentShader->setTexture ("uScene", 4, finalScene);
     presentShader->setTexture ("uBloom", 5, bloom[0].texture());
     presentShader->setTexture ("uBlueNoise", 6, noiseTex.texture());
     presentShader->set ("uBloomStrength", bloomStrength);
@@ -573,6 +608,159 @@ void Renderer::adapt (float dt) noexcept
     }
 }
 
+const Palette& Renderer::paletteFor (const WidgetSettings& w) const noexcept
+{
+    return (paletteOverride != nullptr && ! w.lockPalette) ? *paletteOverride : factoryPalette (w.palette);
+}
+
+void Renderer::loadLook (int index)
+{
+    loadedLook = index;
+    const auto& look = factoryLook (index);
+
+    LayerSpec feedback;
+    feedback.type = LayerType::feedback;
+    feedback.amount = 0.0f;
+    feedback.p = { 0.35f, 0.5f, 0.55f, 0.5f };
+
+    LayerSpec glitch;
+    glitch.type = LayerType::glitch;
+    glitch.amount = 0.0f;
+    glitch.p = { 0.4f, 0.8f, 0.5f, 0.5f };
+
+    LayerSpec chromatic;
+    chromatic.type = LayerType::chromatic;
+    chromatic.amount = 0.0f;
+    chromatic.p = { 1.0f, 0.5f, 0.5f, 0.5f };
+
+    globalBase.clear();
+    lookBloom = 0.0f;
+    bloomThreshold = 0.0f;
+
+    feedbackSlot = globalBase.size();
+    globalBase.push_back (feedback);
+
+    for (const auto& l : look.layers)
+    {
+        if (l.type == LayerType::bloom)
+        {
+            lookBloom = l.amount * 0.2f;
+            bloomThreshold = l.p[0] * 1.5f;
+            continue;
+        }
+        globalBase.push_back (l);
+    }
+
+    glitchSlot = globalBase.size();
+    globalBase.push_back (glitch);
+    chromaticSlot = globalBase.size();
+    globalBase.push_back (chromatic);
+
+    globalCurrent = globalBase;
+    globalChain.release();
+    globalChain.prepare (globalBase.size());
+}
+
+void Renderer::applyModulation() noexcept
+{
+    for (auto& w : widgets)
+    {
+        w->current = w->spec.settings;
+        std::copy (w->spec.layers.begin(), w->spec.layers.end(), w->layersCurrent.begin());
+    }
+    std::copy (globalBase.begin(), globalBase.end(), globalCurrent.begin());
+    bloomStrength = bloomBase + lookBloom;
+    exposure = exposureBase;
+
+    router.forEach ([this] (const ModTarget& t, float v)
+    {
+        using K = ModTarget::Kind;
+        const auto bump = [v] (float& value, float lo, float hi) { value = std::clamp (value + v * (hi - lo), lo, hi); };
+
+        switch (t.kind)
+        {
+            case K::sceneBloom:    bump (bloomStrength, 0.0f, 0.5f); return;
+            case K::sceneExposure: bump (exposure, 0.25f, 4.0f); return;
+            case K::fxFeedback:    bump (globalCurrent[feedbackSlot].amount, 0.0f, 1.0f); return;
+            case K::fxGlitch:      bump (globalCurrent[glitchSlot].amount, 0.0f, 1.0f); return;
+            case K::fxChromatic:   bump (globalCurrent[chromaticSlot].amount, 0.0f, 1.0f); return;
+            case K::widgetIntensity: case K::widgetSpeed: case K::widgetScale:
+            case K::widgetColorShift: case K::widgetParam: break;
+        }
+
+        for (size_t i = 0; i < widgets.size(); ++i)
+        {
+            if (t.widget >= 0 && (size_t) t.widget != i)
+                continue;
+
+            auto& s = widgets[i]->current;
+            switch (t.kind)
+            {
+                case K::widgetIntensity:  bump (s.intensity, 0.0f, 2.0f); break;
+                case K::widgetSpeed:      bump (s.speed, 0.0f, 4.0f); break;
+                case K::widgetScale:      bump (s.scale, 0.25f, 3.0f); break;
+                case K::widgetColorShift: s.colorShift = s.colorShift + v - std::floor (s.colorShift + v); break;   // wraps around
+                case K::widgetParam:      bump (s.p[(size_t) std::clamp (t.index, 0, 15)], 0.0f, 1.0f); break;
+                case K::sceneBloom: case K::sceneExposure: case K::fxFeedback: case K::fxGlitch: case K::fxChromatic: break;
+            }
+        }
+    });
+}
+
+GLuint Renderer::applyLayers (LayerChain& chain, const std::vector<LayerSpec>& layers, GLuint input,
+                              int width, int height, const WidgetSettings& settings) noexcept
+{
+    GLuint current = input;
+    int flip = 0;
+
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        const auto& l = layers[i];
+        auto* shader = layerShaders[(size_t) l.type];
+        if (shader == nullptr || l.amount <= 0.001f)
+            continue;
+
+        auto& out = chain.pingPong[(size_t) flip];
+        out.ensure (width, height);
+        out.bind();
+        gfx::Device::setBlend (gfx::Device::Blend::none);
+        shader->use();
+
+        WidgetSettings s = settings;
+        if (l.palette >= 0)
+        {
+            s.palette = l.palette;
+            s.lockPalette = true;
+            s.colorShift = 0.0f;
+        }
+        bindCommon (*shader, s, width, height);
+        shader->setTexture ("uSource", 4, current);
+        shader->set ("uAmount", l.amount);
+        shader->setFloats ("uL", l.p.data(), 4);
+
+        gfx::RenderTarget* history = nullptr;
+        if (l.type == LayerType::feedback && i < chain.history.size())
+        {
+            history = chain.history[i].get();
+            history->ensure (width, height);
+            shader->setTexture ("uHistory", 5, history->texture());
+        }
+
+        dev.drawFullscreen();
+
+        if (history != nullptr)   // keep this frame for the next one
+        {
+            history->bind();
+            drawTexture (out.texture(), 1.0f);
+        }
+
+        current = out.texture();
+        flip = 1 - flip;
+    }
+
+    return current;
+}
+
 void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHeight,
                        GLuint outputFramebuffer, int vx, int vy, int vw, int vh, const FrameSettings& settings)
 {
@@ -581,6 +769,8 @@ void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHe
 
     in = &inputs;
     masterIntensity = settings.masterIntensity;
+    macros = settings.macros;
+    paletteOverride = settings.paletteOverride;
     ++frameCounter;
 
     collectGpuTime();
@@ -596,14 +786,35 @@ void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHe
     if (timing)
         glBeginQuery (GL_TIME_ELAPSED, queries[(size_t) queryWrite]);
 
+    if (settings.look != loadedLook)
+        loadLook (settings.look);
+
+    router.update (inputs, macros, inputs.dt);
+    applyModulation();
     updateDataTextures (inputs);
+
+    // Each widget's clocks advance at its own (modulated) Speed, so speed changes never jump.
+    const float motionStep = std::max (inputs.motion - lastMotion, 0.0f);
+    lastMotion = inputs.motion;
 
     for (auto& w : widgets)
     {
+        w->clock += inputs.dt * w->current.speed;
+        w->motion += motionStep * w->current.speed;
+        w->current.clock = w->clock;
+        w->current.motionClock = w->motion;
+
         w->target.ensure (std::max (8, (int) std::lround (w->spec.w * (float) cw)),
                           std::max (8, (int) std::lround (w->spec.h * (float) ch)));
-        w->module->render (*this, w->target, w->spec.settings);
+        w->module->render (*this, w->target, w->current);
+        w->output = applyLayers (w->chain, w->layersCurrent, w->target.texture(), w->target.width(), w->target.height(), w->current);
     }
+
+    WidgetSettings global;
+    global.palette = backgroundPalette;
+    global.clock = inputs.time;
+    global.motionClock = inputs.motion;
+    const Rgb background = paletteFor (global).linear (5);
 
     sceneTarget.ensure (cw, ch);
     sceneTarget.clear (background.r, background.g, background.b, 1.0f);
@@ -614,11 +825,13 @@ void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHe
                     (int) std::lround ((1.0f - w->spec.y - w->spec.h) * (float) ch),
                     w->target.width(), w->target.height());
         gfx::Device::setBlend (toDeviceBlend (w->spec.blend));
-        drawTexture (w->target.texture(), w->spec.opacity);
+        drawTexture (w->output, w->spec.opacity);
     }
     gfx::Device::setBlend (gfx::Device::Blend::none);
 
-    renderBloom (cw, ch);
+    finalScene = applyLayers (globalChain, globalCurrent, sceneTarget.texture(), cw, ch, global);
+
+    renderBloom (finalScene, cw, ch);
     measureAndLimit (inputs.dt, settings);
 
     gfx::Device::bindBackbuffer (outputFramebuffer, vx, vy, vw, vh);

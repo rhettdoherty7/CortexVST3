@@ -1,6 +1,8 @@
 #pragma once
 
 #include "FrameInterpolator.h"
+#include "Layers.h"
+#include "ModRouter.h"
 #include "Palette.h"
 #include "Scene.h"
 
@@ -22,6 +24,9 @@ struct FrameSettings
     FlashLimiter::Mode flashMode = FlashLimiter::Mode::standard;
     float masterIntensity = 1.0f;
     bool exact = false;     // offline rendering: full resolution, and the flash limiter measures the same frame it limits
+    std::array<float, 8> macros {};          // 0..1
+    int look = 0;                            // index into factoryLook(), 0 = none
+    const Palette* paletteOverride = nullptr; // e.g. from cover art: replaces every widget's palette
 };
 
 struct RenderStats
@@ -80,8 +85,26 @@ private:
     struct LiveWidget;
     struct Program { std::string vertex, fragment; std::unique_ptr<gfx::Shader> shader; };
 
+    /** Ping-pong targets for a stack of layers, plus a history target for each feedback layer. */
+    struct LayerChain
+    {
+        std::array<gfx::RenderTarget, 2> pingPong;
+        std::vector<std::unique_ptr<gfx::RenderTarget>> history;   // one per layer slot
+
+        void prepare (size_t layerCount);
+        void release();
+    };
+
+    /** Runs `layers` over `input` (width x height). Returns the texture holding the result, which is
+        `input` itself when every layer is off. */
+    GLuint applyLayers (LayerChain&, const std::vector<LayerSpec>&, GLuint input, int width, int height,
+                        const WidgetSettings&) noexcept;
+    void loadLook (int index);
+    void applyModulation() noexcept;
+    const Palette& paletteFor (const WidgetSettings&) const noexcept;
+
     void updateDataTextures (const RenderInputs&) noexcept;
-    void renderBloom (int width, int height) noexcept;
+    void renderBloom (GLuint source, int width, int height) noexcept;
     void present (int measure, const FrameSettings&) noexcept;
     void measureAndLimit (float dt, const FrameSettings&) noexcept;
     void collectGpuTime() noexcept;
@@ -93,6 +116,7 @@ private:
     gfx::Device dev;
     std::map<std::string, Program> programs;
     gfx::Shader *copyShader = nullptr, *downShader = nullptr, *upShader = nullptr, *presentShader = nullptr;
+    std::array<gfx::Shader*, (size_t) LayerType::count> layerShaders {};
 
     gfx::DataTexture spectrumTex, waveTex, waveHistoryTex, spectrumHistoryTex, noiseTex;
     std::vector<float> waveStaging, waveHistoryRing, waveHistoryStaging, spectrumHistoryRing, spectrumHistoryStaging;
@@ -103,9 +127,24 @@ private:
     std::array<gfx::RenderTarget, 6> bloom;
 
     std::vector<std::unique_ptr<LiveWidget>> widgets;
-    Rgb background;
+    int backgroundPalette = 0;
     Tonemap tonemap = Tonemap::film;
-    float exposure = 1.0f, bloomStrength = 0.08f;
+    float exposureBase = 1.0f, bloomBase = 0.08f;       // from the scene
+    float exposure = 1.0f, bloomStrength = 0.08f;       // after modulation
+    float bloomThreshold = 0.0f, lookBloom = 0.0f;      // from the Look's bloom layer
+
+    // Global effects: the Feedback slot, the Look's layers, then the Glitch and Chromatic slots.
+    // The three slots sit at amount 0 (skipped) until a macro or route raises them.
+    std::vector<LayerSpec> globalBase, globalCurrent;
+    size_t feedbackSlot = 0, glitchSlot = 0, chromaticSlot = 0;
+    LayerChain globalChain;
+    GLuint finalScene = 0;
+    int loadedLook = -1;
+
+    ModRouter router;
+    std::array<float, 8> macros {};
+    float lastMotion = 0.0f;
+    const Palette* paletteOverride = nullptr;
 
     FlashLimiter limiter;
     std::array<GLuint, 3> pixelBuffers {};

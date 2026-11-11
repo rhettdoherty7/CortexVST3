@@ -83,14 +83,14 @@ vec3 oklabToLinear(vec3 c)
 }
 
 // The palette as a gradient, mixed in OKLab. t = 0 is the darkest colour, 1 the brightest.
-// With Color Shift above zero the gradient becomes a loop and rotates.
+// Color Shift turns the gradient around a loop of the five colours; at 0 it is the plain ramp,
+// and it moves continuously from there, so automating it never jumps.
 vec3 palette(float t)
 {
-    bool looped = uColorShift > 0.0005;
-    float x = looped ? fract(t * 0.8 + uColorShift) * 5.0 : clamp(t, 0.0, 1.0) * 4.0;
+    float x = mod(clamp(t, 0.0, 1.0) * 4.0 + uColorShift * 5.0, 5.0);
     float i = floor(x);
-    int a = int(mod(i, 5.0));
-    int b = looped ? int(mod(i + 1.0, 5.0)) : min(a + 1, 4);
+    int a = int(i);
+    int b = int(mod(i + 1.0, 5.0));
     return max(oklabToLinear(mix(uPaletteLab[a], uPaletteLab[b], x - i)), vec3(0.0));
 }
 

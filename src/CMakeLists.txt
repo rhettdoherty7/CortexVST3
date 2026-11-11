@@ -27,6 +27,12 @@ target_sources(cortex_engine_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/FrameInterpolator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/Scene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/Scene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Layers.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Layers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/ModRouter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/ModRouter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/CoverArtPalette.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/CoverArtPalette.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.cpp)
 target_link_libraries(cortex_engine_core INTERFACE cortex_analysis)
@@ -73,7 +79,7 @@ juce_add_plugin(Cortex
     FORMATS                     ${CORTEX_FORMATS}
     PRODUCT_NAME                "Cortex"
     IS_SYNTH                    FALSE
-    NEEDS_MIDI_INPUT            FALSE
+    NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           FALSE
     IS_MIDI_EFFECT              FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE

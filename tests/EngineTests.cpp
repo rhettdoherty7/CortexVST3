@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <deque>
+#include <string>
 
 using namespace cortex;
 using Catch::Approx;
@@ -276,4 +277,176 @@ TEST_CASE ("With no audio the idle animation keeps moving", "[interpolator]")
         highest = std::max (highest, in.kick);
     }
     CHECK (highest - lowest > 0.2f);
+}
+
+// --- Modulation ----------------------------------------------------------------------------------
+
+#include <engine/Layers.h>
+#include <engine/ModRouter.h>
+#include <presets/CoverArtPalette.h>
+
+namespace
+{
+    std::vector<float> routeOutputs (const ModRouter& router)
+    {
+        std::vector<float> out;
+        router.forEach ([&out] (const ModTarget&, float v) { out.push_back (v); });
+        return out;
+    }
+}
+
+TEST_CASE ("Routes follow their source through the curve", "[modulation]")
+{
+    ModRouter router;
+    ModRoute linear, squared, root;
+    linear.source = squared.source = root.source = ModSource::kick;
+    linear.amount = squared.amount = root.amount = 1.0f;
+    squared.curve = ModCurve::exponential;
+    root.curve = ModCurve::logarithmic;
+    router.setRoutes ({ linear, squared, root });
+
+    RenderInputs in;
+    in.kick = 0.25f;
+    router.update (in, {}, 1.0f / 60.0f);
+
+    const auto out = routeOutputs (router);
+    REQUIRE (out.size() == 3);
+    CHECK (out[0] == Approx (0.25f));
+    CHECK (out[1] == Approx (0.0625f));
+    CHECK (out[2] == Approx (0.5f));
+}
+
+TEST_CASE ("Route smoothing glides at the same rate at any frame rate", "[modulation]")
+{
+    const auto after = [] (int hz)
+    {
+        ModRouter router;
+        ModRoute r;
+        r.source = ModSource::macro1;
+        r.amount = 1.0f;
+        r.smoothing = 0.1f;
+        router.setRoutes ({ r });
+
+        std::array<float, 8> macros {};
+        macros[0] = 1.0f;
+        for (int i = 0; i < hz / 10; ++i)   // 100 ms
+            router.update ({}, macros, 1.0f / (float) hz);
+        return routeOutputs (router)[0];
+    };
+
+    CHECK (after (60) == Approx (1.0f - std::exp (-1.0f)).margin (0.01));
+    CHECK (after (60) == Approx (after (240)).margin (0.01));
+}
+
+TEST_CASE ("Tempo LFOs and the random source follow the beat", "[modulation]")
+{
+    ModRouter router;
+    router.setRoutes ({});
+
+    RenderInputs in;
+    in.barPhase = 0.5f;
+    in.beatPhase = 0.5f;
+    router.update (in, {}, 0.01f);
+    CHECK (router.source (ModSource::lfo1) == Approx (1.0f));   // a bar's sine peaks half-way
+    CHECK (router.source (ModSource::lfo2) == Approx (1.0f));   // a beat's triangle peaks half-way
+
+    in.beatPhase = 0.9f;
+    router.update (in, {}, 0.01f);
+    const float before = router.source (ModSource::random);
+    in.beatPhase = 0.95f;
+    router.update (in, {}, 0.01f);
+    CHECK (router.source (ModSource::random) == before);        // holds within a beat
+
+    in.beatPhase = 0.02f;                                        // the beat wraps
+    router.update (in, {}, 0.01f);
+    CHECK (router.source (ModSource::random) != before);
+}
+
+TEST_CASE ("Every macro has a fixed route and a label", "[modulation]")
+{
+    const auto& routes = macroRoutes();
+    REQUIRE (routes.size() == 8);
+    for (int m = 0; m < 8; ++m)
+    {
+        CHECK (routes[(size_t) m].source == (ModSource) ((int) ModSource::macro1 + m));
+        CHECK (std::string (macroLabel (m)).size() > 0);
+    }
+}
+
+TEST_CASE ("Factory Looks are well formed", "[looks]")
+{
+    REQUIRE (numFactoryLooks() >= 8);
+    CHECK (factoryLook (0).layers.empty());   // "None"
+    for (int i = 1; i < numFactoryLooks(); ++i)
+    {
+        const auto& look = factoryLook (i);
+        INFO (look.name);
+        CHECK_FALSE (look.layers.empty());
+        for (const auto& l : look.layers)
+        {
+            CHECK (l.amount > 0.0f);
+            CHECK (l.amount <= 1.0f);
+            CHECK ((l.type == LayerType::bloom || layerShaderFile (l.type) != nullptr));
+            CHECK (l.palette < numFactoryPalettes());
+        }
+    }
+}
+
+// --- Cover art -----------------------------------------------------------------------------------
+
+namespace
+{
+    std::vector<Rgb> blocks (std::initializer_list<Rgb> colours, int each = 400)
+    {
+        std::vector<Rgb> out;
+        for (const auto& c : colours)
+            for (int i = 0; i < each; ++i)
+                out.push_back (c);
+        return out;
+    }
+
+    float hueDegrees (const Rgb& lab) { return std::atan2 (lab.b, lab.g) * 57.29578f; }
+}
+
+TEST_CASE ("A cover-art palette runs dark to bright over a near-black background", "[coverart]")
+{
+    const auto pixels = blocks ({ { 0.9f, 0.1f, 0.1f }, { 0.1f, 0.6f, 0.2f }, { 0.1f, 0.2f, 0.9f },
+                                  { 0.95f, 0.85f, 0.2f }, { 0.95f, 0.95f, 0.95f }, { 0.05f, 0.04f, 0.06f } });
+    const auto p = paletteFromPixels (pixels);
+
+    for (int c = 0; c < 4; ++c)
+        CHECK (p.oklab (c).r < p.oklab (c + 1).r);
+    CHECK (p.oklab (5).r < 0.2f);
+
+    // Deterministic.
+    CHECK (paletteFromPixels (pixels).srgbHex == p.srgbHex);
+}
+
+TEST_CASE ("A red cover gives a red palette", "[coverart]")
+{
+    // Shades of red, from dark to light.
+    std::vector<Rgb> pixels;
+    for (int i = 0; i < 3000; ++i)
+    {
+        const float t = (float) (i % 100) / 99.0f;
+        pixels.push_back ({ 0.25f + 0.7f * t, 0.05f + 0.15f * t * t, 0.05f + 0.12f * t * t });
+    }
+    const auto p = paletteFromPixels (pixels);
+
+    const float redHue = hueDegrees (linearToOklab ({ 1.0f, 0.0f, 0.0f }));
+    for (int c = 0; c < 4; ++c)   // the lightest may be close to white, where hue means little
+    {
+        INFO ("colour " << c << " hue " << hueDegrees (p.oklab (c)) << ", red is " << redHue);
+        CHECK (std::abs (hueDegrees (p.oklab (c)) - redHue) < 30.0f);
+    }
+}
+
+TEST_CASE ("A flat or empty cover still gives a usable palette", "[coverart]")
+{
+    const auto flat = paletteFromPixels (blocks ({ { 0.3f, 0.5f, 0.7f } }));
+    for (int c = 0; c < 4; ++c)
+        CHECK (flat.oklab (c).r < flat.oklab (c + 1).r);
+
+    const auto empty = paletteFromPixels ({});
+    CHECK (empty.srgbHex == factoryPalette (0).srgbHex);
 }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include "Layers.h"
+#include "ModRouter.h"
+
 #include <array>
 #include <vector>
 
@@ -15,6 +18,11 @@ struct WidgetSettings
     float intensity = 1.0f, speed = 1.0f, scale = 1.0f, colorShift = 0.0f;
     std::array<float, 16> p {};    // module-specific parameters, meaning documented in each shader
     int palette = 0;
+    bool lockPalette = false;      // true: ignore a cover-art palette override (Looks with fixed colours)
+
+    // Filled in by the renderer each frame: this widget's own clocks, which advance at its Speed,
+    // so changing Speed changes the rate of motion without making anything jump.
+    float clock = 0.0f, motionClock = 0.0f;
 };
 
 /** One widget in a scene description (section 5.1). Rotation is not supported yet. */
@@ -25,6 +33,7 @@ struct WidgetSpec
     BlendMode blend = BlendMode::normal;
     float opacity = 1.0f;
     WidgetSettings settings;
+    std::vector<LayerSpec> layers;  // this widget's own effects, applied before compositing
 };
 
 struct SceneSpec
@@ -35,6 +44,7 @@ struct SceneSpec
     Tonemap tonemap = Tonemap::film;
     float exposure = 1.0f;
     float bloom = 0.08f;            // bloom mixed into the picture, 0..1
+    std::vector<ModRoute> routes;   // scene modulation, in addition to the macro routes
 };
 
 /** Factory scenes, built once. Index 0 is the default. */

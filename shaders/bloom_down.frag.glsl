@@ -4,6 +4,7 @@
 uniform sampler2D uSource;
 uniform vec2 uTexel;      // one texel of the source
 uniform int  uFirst;
+uniform float uThreshold;   // first pass only: light below this does not bloom (soft knee)
 
 vec3 tap(vec2 offset) { return texture(uSource, vUv + offset * uTexel).rgb; }
 
@@ -27,6 +28,11 @@ void main()
         colour = karis(j, k, l, m) * 0.5
                + (karis(a, b, d, e) + karis(b, c, e, f) + karis(d, e, g, h) + karis(e, f, h, i)) * 0.125;
         colour /= max(1.0 - luma(colour), 0.05);   // undo the weighting's average darkening
+        float lum = luma(colour);
+        float knee = max(uThreshold * 0.5, 1.0e-4);
+        float soft = clamp(lum - uThreshold + knee, 0.0, 2.0 * knee);
+        soft = soft * soft / (4.0 * knee);
+        colour *= max(soft, lum - uThreshold) / max(lum, 1.0e-4);
     }
     else
     {
