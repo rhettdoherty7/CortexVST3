@@ -87,6 +87,43 @@ Started before Phase 1's FL Studio check, at Rhett's request (D-012).
 - The Module select, Look select and macro parameters exist but nothing reads them.
 - On laptops with two GPUs the editor runs on the integrated one. Picking the discrete GPU is not handled.
 
+## Phase 3: Modulation, layers, UI
+
+Started before the FL Studio checks of Phases 1 and 2, at Rhett's request (D-012).
+
+- [x] ModRouter: 28 sources (drums, bands, level, flux, brightness, pitch, beat and bar phase,
+      2 tempo LFOs, random on the beat, 8 macros), linear / exponential / log curves, per-route smoothing
+- [x] 8 macros with fixed jobs: Intensity, Speed, Scale, Color, Bloom, Trails, Glitch, Aberration (D-024)
+- [x] MIDI learn on every macro and on scene select (right-click), saved with the project
+- [x] 8 core layers: Bloom, Film Grain, Vignette, Chromatic, Scanlines/CRT, Feedback, Glitch, Gradient Map.
+      Usable on any widget or on the whole scene
+- [x] Looks system, 8 factory Looks plus None, chosen by the Look parameter
+- [x] Cover-art palette: drop a PNG/JPG on the editor, k-means in OKLab, saved with the project
+- [ ] Final UI per section 10 (module rail with thumbnails, inspector, layer and route editing)
+- [ ] Preset browser (tags, favourites, search, A/B) and the `.cortex` preset format
+- [ ] Scene crossfade on scene changes
+- [ ] **Done when:** a non-technical user can pick a scene, drop cover art and get a good-looking result
+      in under 60 seconds. The pieces exist (scene picker, Look picker, cover drop); nobody has tried it.
+
+### Measured on 2026-11-11 (Release build, Intel Arc integrated GPU)
+
+| Check | Result |
+|---|---|
+| Unit tests | 35 test cases, 1,098 assertions, all pass |
+| pluginval strictness 10 | SUCCESS (now with MIDI input) |
+| Three widgets, no Look, 1080p | 5.9 to 6.4 ms GPU |
+| Three widgets with each Look, 1080p | 6.4 ms (2 layers) to 9.0 ms (VHS Tape, 5 layers); about 0.5 ms per layer |
+
+### Known gaps
+
+- VHS Tape is over the 8 ms budget on this integrated GPU, and Terminal and Ghost Trails are at it.
+  Fix to try: run the per-pixel layers (grain, vignette, gradient map) as one pass.
+- Looks are not yet used as modulation targets, and routes can only be set in `engine/Scene.cpp`
+  until the inspector exists. Factory scenes use the macro routes only.
+- Riso Print and Glass from section 5.5 need Halftone and Glass layers, which are Phase 6.
+- Glitch mostly reacts to snares, so it can look idle on beats with few of them.
+- Cover art has only been checked with a generated test image, not real artwork.
+
 ## How to build
 
 ```
@@ -100,6 +137,8 @@ To render every scene to PNG and time it on this GPU:
 ```
 build\tools\snapshot\cortex_snapshot_artefacts\Release\cortex_snapshot.exe --out build\snapshots
 ```
+
+Add `--cover <image>` to also render every scene with the palette taken from that image.
 
 Set `CORTEX_STATS_LOG=<file>` before launching the standalone to log its frame rate and GPU time once a second.
 Hidden test tags: `cortex_tests "[.dump]"` prints per-frame detector values, `cortex_tests "[.bench]"` prints CPU cost.

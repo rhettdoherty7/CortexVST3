@@ -116,6 +116,39 @@ factory "Phosphor" scene uses the triggered time-domain trace. X/Y stays availab
 Film = AgX (fitted), Punchy = ACES fitted (Hill), Neutral = Khronos PBR Neutral. Each scene picks one;
 all factory scenes use Film for now.
 
+## D-023: Effects run on whole frames, not on a node graph
+Each widget and the scene have an ordered list of layers, run as fullscreen passes between two ping-pong
+targets. A layer at amount 0 is skipped, so unused effects cost nothing. Feedback keeps its own history
+target. Bloom is not a pass: the Bloom layer raises the renderer's bloom strength and threshold.
+
+## D-024: The 8 macros have fixed jobs
+Section 6 says macros "map internally to anything". Until the inspector can edit routes, each macro has
+one fixed job on every scene: 1 Intensity, 2 Speed, 3 Scale, 4 Color (palette rotation), 5 Bloom,
+6 Trails, 7 Glitch, 8 Aberration. The last three drive effect slots that sit at zero in every scene,
+so turning a macro up always does something visible and turning it down returns to the scene as
+designed. Macro 4 stops short of a full turn so its maximum never looks the same as zero.
+
+## D-025: Each widget keeps its own clock
+Speed (and the Speed macro) changes how fast a widget's clock advances, instead of multiplying a shared
+clock. Multiplying made everything jump whenever Speed moved.
+
+## D-026: MIDI learn goes through atomics and a message-thread timer
+The audio thread only records which controller moved and its value; a 30 Hz timer on the message thread
+turns that into a parameter change. That keeps the audio thread free of locks and host calls. One
+controller drives one slot. Scene select spreads the controller's range over the factory scenes.
+The plugin now declares MIDI input, which hosts show as an event input on the effect.
+
+## D-027: Cover-art palette
+Section 5.6: k-means with k = 6, in OKLab (a Lab space with better hue behaviour than CIELAB), on a
+96 x 96 copy of the image, seeded from a fixed number so the same image always gives the same palette.
+The darkest cluster becomes the background and is pushed to near black; the other five keep their hue
+and chroma but have their lightness spread from 0.30 to 0.90, so every visual gets a full gradient.
+It replaces every widget's palette, except layers that fix their own (Night Vision, Heat Map...).
+
+## D-028: Looks shipped
+Club Neon, VHS Tape, Night Vision, Blueprint, Mono Laser, Heat Map, Ghost Trails, Terminal. Riso Print
+and Glass need Halftone and Glass layers, which are Phase 6 work.
+
 ## Open: JUCE licence
 JUCE 8 is dual-licensed (AGPLv3 or a commercial licence). Selling Cortex closed-source needs a JUCE
 commercial licence tier that matches RD Audio's revenue. Check before release.
