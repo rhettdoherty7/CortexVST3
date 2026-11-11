@@ -10,12 +10,14 @@
 
 #include <analysis/AnalysisEngine.h>
 #include <engine/Renderer.h>
+#include <engine/ModuleInfo.h>
 #include <presets/CoverArtPalette.h>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_opengl/juce_opengl.h>
 
 #include <cstdio>
+#include <map>
 
 namespace
 {
@@ -28,6 +30,7 @@ struct Options
     int width = 1920, height = 1080;
     int timingFrames = 240;
     juce::File cover;   // --cover <image>: also render scenes with the palette taken from it
+    juce::File thumbs;  // --thumbs <folder>: only render one 480 x 270 thumbnail per module
 };
 
 Options parse (const juce::StringArray& args)
@@ -44,6 +47,8 @@ Options parse (const juce::StringArray& args)
         }
         else if (args[i] == "--frames" && i + 1 < args.size())
             o.timingFrames = args[++i].getIntValue();
+        else if (args[i] == "--thumbs" && i + 1 < args.size())
+            o.thumbs = juce::File::getCurrentWorkingDirectory().getChildFile (args[++i].unquoted());
         else if (args[i] == "--cover" && i + 1 < args.size())
             o.cover = juce::File::getCurrentWorkingDirectory().getChildFile (args[++i].unquoted());
     }
@@ -133,6 +138,44 @@ private:
         options.outDir.createDirectory();
         const Track track;
 
+        if (options.thumbs != juce::File())
+        {
+            // One module per thumbnail, on the palette its factory scene uses.
+            const std::map<std::string, int> palettes { { "bloom_orb", 0 }, { "spectrum_bars", 1 }, { "scope", 11 },
+                                                        { "waveform_stack", 3 }, { "flowfield", 7 }, { "pulse_grid", 8 } };
+            options.thumbs.createDirectory();
+            output.ensure (options.width, options.height, GL_RGBA8, false);
+            const double moment = (double) track.pattern.kicks[4] / 48000.0 + 0.035;
+
+            for (const auto& info : cortex::moduleInfos())
+            {
+                const auto found = palettes.find (info.id);
+                const int palette = found != palettes.end() ? found->second : 0;
+                cortex::SceneSpec scene;
+                scene.name = info.name;
+                scene.backgroundPalette = palette;
+                scene.bloom = 0.12f;
+                scene.widgets.push_back (cortex::defaultWidget (info.id, palette));
+
+                log.clear();
+                if (! renderer.loadScene (scene, log))
+                {
+                    std::printf ("%s failed:\n%s\n", info.id, log.c_str());
+                    continue;
+                }
+                const auto image = captureAt (renderer, track, moment).rescaled (480, 270, juce::Graphics::highResamplingQuality);
+                auto file = options.thumbs.getChildFile (juce::String (info.id) + ".png");
+                file.deleteFile();
+                juce::FileOutputStream stream (file);
+                juce::PNGImageFormat().writeImageToStream (image, stream);
+                std::printf ("thumbnail %s\n", file.getFullPathName().toRawUTF8());
+            }
+
+            renderer.shutdown();
+            output.release();
+            return true;
+        }
+
         // Moments to capture: just after a kick, and just after the clap.
         const double kickTime  = (double) track.pattern.kicks[4] / 48000.0 + 0.035;
         const double snareTime = (double) track.pattern.snares[1] / 48000.0 + 0.040;
@@ -148,7 +191,7 @@ private:
             log.clear();
             if (! renderer.loadScene (spec, log))
             {
-                std::printf ("scene %s failed:\n%s\n", spec.name, log.c_str());
+                std::printf ("scene %s failed:\n%s\n", spec.name.c_str(), log.c_str());
                 ok = false;
                 continue;
             }
@@ -195,7 +238,7 @@ private:
                 }
             }
             glFinish();
-            std::printf ("%-10s %d widget(s)  GPU %.2f ms at %dx%d\n", spec.name, (int) spec.widgets.size(),
+            std::printf ("%-10s %d widget(s)  GPU %.2f ms at %dx%d\n", spec.name.c_str(), (int) spec.widgets.size(),
                          counted > 0 ? sum / (float) counted : 0.0f, options.width, options.height);
         }
 
