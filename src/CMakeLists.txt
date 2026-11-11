@@ -33,6 +33,12 @@ target_sources(cortex_engine_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/ModRouter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/presets/CoverArtPalette.h
     ${CMAKE_CURRENT_SOURCE_DIR}/presets/CoverArtPalette.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/PresetFormat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/PresetFormat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/PresetManager.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/presets/PresetManager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/ModuleInfo.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/ModuleInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.cpp)
 target_link_libraries(cortex_engine_core INTERFACE cortex_analysis)
@@ -62,6 +68,16 @@ target_sources(cortex_render INTERFACE
 # Debug builds read shaders straight from the source folder so edits show up live.
 target_compile_definitions(cortex_render INTERFACE CORTEX_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
 target_link_libraries(cortex_render INTERFACE cortex_engine_core cortex_shaders juce::juce_opengl)
+
+# --- Interface resources: fonts (resources/fonts, SIL OFL) and module thumbnails ------------------
+
+file(GLOB CORTEX_UI_FILES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/resources/fonts/*.ttf
+    ${CMAKE_SOURCE_DIR}/resources/thumbnails/*.png)
+juce_add_binary_data(cortex_ui_data
+    HEADER_NAME CortexUiData.h
+    NAMESPACE   CortexUiData
+    SOURCES     ${CORTEX_UI_FILES})
 
 # --- Plugin ------------------------------------------------------------------------------------
 
@@ -97,7 +113,15 @@ target_sources(Cortex PRIVATE
     core/PluginEditor.h
     core/PluginEditor.cpp
     ui/CanvasComponent.h
-    ui/CanvasComponent.cpp)
+    ui/CanvasComponent.cpp
+    ui/Theme.h
+    ui/Theme.cpp
+    ui/ModuleRail.h
+    ui/ModuleRail.cpp
+    ui/Inspector.h
+    ui/Inspector.cpp
+    ui/PresetBrowser.h
+    ui/PresetBrowser.cpp)
 
 target_compile_definitions(Cortex PUBLIC
     JUCE_WEB_BROWSER=0
@@ -111,6 +135,7 @@ target_link_libraries(Cortex
     PRIVATE
         cortex_analysis
         cortex_render
+        cortex_ui_data
         cortex_warnings
         juce::juce_audio_utils
         juce::juce_opengl

@@ -10,6 +10,8 @@ uniform int   uTonemap;           // 0 Film (AgX), 1 Punchy (ACES fitted), 2 Neu
 uniform int   uMeasure;
 uniform float uGain, uRedDesaturation;
 uniform ivec2 uNoiseOffset;
+uniform sampler2D uFadeFrom;      // the previous scene's last frame during a crossfade
+uniform float uFadeOld;           // 1 = all old scene, 0 = all new
 
 // --- AgX (Troy Sobotka), minimal fitted form -----------------------------------------------------
 vec3 agxContrast(vec3 x)
@@ -74,6 +76,8 @@ float redAmount(vec3 c)
 void main()
 {
     vec3 hdr = texture(uScene, vUv).rgb + texture(uBloom, vUv).rgb * (uBloomStrength / 6.0);
+    if (uFadeOld > 0.0)
+        hdr = mix(hdr, texture(uFadeFrom, vUv).rgb, uFadeOld);
     hdr *= uExposure;
 
     vec3 c = uTonemap == 1 ? acesFitted(hdr) : (uTonemap == 2 ? neutral(hdr) : agx(hdr));

@@ -4,6 +4,7 @@
 #include "ModRouter.h"
 
 #include <array>
+#include <string>
 #include <vector>
 
 namespace cortex
@@ -28,7 +29,7 @@ struct WidgetSettings
 /** One widget in a scene description (section 5.1). Rotation is not supported yet. */
 struct WidgetSpec
 {
-    const char* module = "";
+    std::string module;
     float x = 0.0f, y = 0.0f, w = 1.0f, h = 1.0f;   // fraction of the canvas, origin top-left
     BlendMode blend = BlendMode::normal;
     float opacity = 1.0f;
@@ -38,13 +39,15 @@ struct WidgetSpec
 
 struct SceneSpec
 {
-    const char* name = "";
+    std::string name;
+    std::vector<std::string> tags;  // for the preset browser: module, mood, genre
     std::vector<WidgetSpec> widgets;
     int backgroundPalette = 0;      // the palette whose background colour fills the canvas
     Tonemap tonemap = Tonemap::film;
     float exposure = 1.0f;
     float bloom = 0.08f;            // bloom mixed into the picture, 0..1
     std::vector<ModRoute> routes;   // scene modulation, in addition to the macro routes
+    float crossfadeBeats = 1.0f;    // how long a change to this scene takes to fade in
 };
 
 /** Factory scenes, built once. Index 0 is the default. */

@@ -39,6 +39,23 @@ const char* layerShaderFile (LayerType type) noexcept
     return nullptr;
 }
 
+std::vector<const char*> layerParamNames (LayerType type)
+{
+    switch (type)
+    {
+        case LayerType::bloom:       return { "Threshold" };
+        case LayerType::grain:       return { "Grain size", "Colour" };
+        case LayerType::vignette:    return { "Size", "Softness" };
+        case LayerType::chromatic:   return { "Kick response" };
+        case LayerType::scanlines:   return { "Line density", "Curvature" };
+        case LayerType::feedback:    return { "Zoom", "Rotation", "Trail length" };
+        case LayerType::glitch:      return { "Block size", "Snare drive" };
+        case LayerType::gradientMap: return { "Contrast" };
+        case LayerType::count:       break;
+    }
+    return {};
+}
+
 namespace
 {
     // Palette indices into factoryPalette() (engine/Palette.cpp).

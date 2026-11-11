@@ -228,7 +228,8 @@ bool Renderer::init (std::string& log)
     downShader    = program ("fullscreen.vert.glsl", "bloom_down.frag.glsl", log);
     upShader      = program ("fullscreen.vert.glsl", "bloom_up.frag.glsl", log);
     presentShader = program ("fullscreen.vert.glsl", "present.frag.glsl", log);
-    if (copyShader == nullptr || downShader == nullptr || upShader == nullptr || presentShader == nullptr)
+    overlayShader = program ("fullscreen.vert.glsl", "overlay.frag.glsl", log);
+    if (copyShader == nullptr || downShader == nullptr || upShader == nullptr || presentShader == nullptr || overlayShader == nullptr)
         return false;
 
     for (int t = 0; t < (int) LayerType::count; ++t)
@@ -270,7 +271,9 @@ void Renderer::shutdown()
     globalChain.release();
     loadedLook = -1;
     programs.clear();
-    copyShader = downShader = upShader = presentShader = nullptr;
+    copyShader = downShader = upShader = presentShader = overlayShader = nullptr;
+    fadeFrom.release();
+    fadeSeconds = fadeElapsed = 0.0f;
     layerShaders = {};
 
     for (auto* t : { &spectrumTex, &waveTex, &waveHistoryTex, &spectrumHistoryTex, &noiseTex })
@@ -332,7 +335,68 @@ bool Renderer::loadScene (const SceneSpec& spec, std::string& log)
     tonemap = spec.tonemap;
     exposureBase = exposure = spec.exposure;
     bloomBase = bloomStrength = spec.bloom;
+    crossfadeBeats = spec.crossfadeBeats;
     return true;
+}
+
+bool Renderer::applyScene (const SceneSpec& spec, std::string& log, bool crossfade)
+{
+    bool sameShape = widgets.size() == spec.widgets.size();
+    for (size_t i = 0; sameShape && i < widgets.size(); ++i)
+    {
+        const auto& live = widgets[i]->spec;
+        const auto& next = spec.widgets[i];
+        sameShape = live.module == next.module && live.layers.size() == next.layers.size();
+        for (size_t k = 0; sameShape && k < live.layers.size(); ++k)
+            sameShape = live.layers[k].type == next.layers[k].type;
+    }
+
+    if (sameShape)
+    {
+        for (size_t i = 0; i < widgets.size(); ++i)
+            widgets[i]->spec = spec.widgets[i];
+
+        auto routes = spec.routes;
+        routes.insert (routes.end(), macroRoutes().begin(), macroRoutes().end());
+        router.setRoutes (std::move (routes));
+
+        backgroundPalette = spec.backgroundPalette;
+        tonemap = spec.tonemap;
+        exposureBase = spec.exposure;
+        bloomBase = spec.bloom;
+        crossfadeBeats = spec.crossfadeBeats;
+        return true;
+    }
+
+    // A different scene: keep the last frame and fade from it, if there is one to fade from.
+    fadeSeconds = 0.0f;
+    if (crossfade && finalScene != 0 && sceneTarget.valid() && spec.crossfadeBeats > 0.0f)
+    {
+        fadeFrom.ensure (sceneTarget.width(), sceneTarget.height());
+        fadeFrom.bind();
+        gfx::Device::setBlend (gfx::Device::Blend::none);
+        drawTexture (finalScene, 1.0f);
+        fadeSeconds = spec.crossfadeBeats * 60.0f / (float) std::max (lastBpm, 1.0);
+        fadeElapsed = 0.0f;
+    }
+
+    return loadScene (spec, log);
+}
+
+void Renderer::drawSelection (int widgetIndex, int vx, int vy, int vw, int vh) noexcept
+{
+    if (widgetIndex < 0 || widgetIndex >= (int) widgets.size())
+        return;
+
+    const auto& w = widgets[(size_t) widgetIndex]->spec;
+    glViewport (vx, vy, vw, vh);
+    gfx::Device::setBlend (gfx::Device::Blend::alpha);
+    overlayShader->use();
+    overlayShader->set ("uRect", w.x, 1.0f - w.y - w.h, w.x + w.w, 1.0f - w.y);
+    overlayShader->set ("uViewport", (float) vw, (float) vh);
+    overlayShader->set ("uAccent", 0.20f, 0.10f, 1.0f);   // #7C5CFF in linear light
+    dev.drawFullscreen();
+    gfx::Device::setBlend (gfx::Device::Blend::none);
 }
 
 // --- Helpers for modules -------------------------------------------------------------------------
@@ -492,6 +556,12 @@ void Renderer::present (int measure, const FrameSettings&) noexcept
     presentShader->set ("uMeasure", measure);
     presentShader->set ("uGain", limiterGain);
     presentShader->set ("uRedDesaturation", redDesaturation);
+
+    // Crossfade from the previous scene, eased.
+    const float t = fadeSeconds > 0.0f ? std::clamp (fadeElapsed / fadeSeconds, 0.0f, 1.0f) : 1.0f;
+    const float eased = t * t * (3.0f - 2.0f * t);
+    presentShader->setTexture ("uFadeFrom", 7, fadeFrom.valid() ? fadeFrom.texture() : finalScene);
+    presentShader->set ("uFadeOld", fadeSeconds > 0.0f ? 1.0f - eased : 0.0f);
     glUniform2i (presentShader->location ("uNoiseOffset"), (int) ((frameCounter * 37u) & 63u), (int) ((frameCounter * 23u) & 63u));
     dev.drawFullscreen();
 }
@@ -771,7 +841,15 @@ void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHe
     masterIntensity = settings.masterIntensity;
     macros = settings.macros;
     paletteOverride = settings.paletteOverride;
+    lastBpm = inputs.bpm;
     ++frameCounter;
+
+    if (fadeSeconds > 0.0f)
+    {
+        fadeElapsed += inputs.dt;
+        if (fadeElapsed >= fadeSeconds)
+            fadeSeconds = 0.0f;
+    }
 
     collectGpuTime();
     if (settings.exact)
@@ -834,8 +912,13 @@ void Renderer::render (const RenderInputs& inputs, int canvasWidth, int canvasHe
     renderBloom (finalScene, cw, ch);
     measureAndLimit (inputs.dt, settings);
 
+    // A resize during a crossfade would sample the old frame at the wrong scale: end the fade.
+    if (fadeSeconds > 0.0f && (fadeFrom.width() != cw || fadeFrom.height() != ch))
+        fadeSeconds = 0.0f;
+
     gfx::Device::bindBackbuffer (outputFramebuffer, vx, vy, vw, vh);
     present (0, settings);
+    drawSelection (settings.selectedWidget, vx, vy, vw, vh);
 
     if (timing)
     {

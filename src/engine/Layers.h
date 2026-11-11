@@ -26,6 +26,7 @@ struct LookSpec
 
 const char* layerName (LayerType) noexcept;
 const char* layerShaderFile (LayerType) noexcept;   // nullptr for bloom
+std::vector<const char*> layerParamNames (LayerType);   // names of p[0..], for the inspector
 
 /** Index 0 is "None". */
 int numFactoryLooks() noexcept;

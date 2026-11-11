@@ -27,6 +27,7 @@ struct FrameSettings
     std::array<float, 8> macros {};          // 0..1
     int look = 0;                            // index into factoryLook(), 0 = none
     const Palette* paletteOverride = nullptr; // e.g. from cover art: replaces every widget's palette
+    int selectedWidget = -1;                 // editor only: outline this widget
 };
 
 struct RenderStats
@@ -50,6 +51,11 @@ public:
     void shutdown();
 
     bool loadScene (const SceneSpec&, std::string& log);
+
+    /** Takes an edited scene. If only values changed (same widgets, modules and layer types) it updates
+        in place, so trails and particles carry on. Otherwise it reloads, and with `crossfade` fades from
+        the last frame over the scene's crossfade length. */
+    bool applyScene (const SceneSpec&, std::string& log, bool crossfade);
 
     /** canvasWidth/Height: full-quality internal resolution. Draws into `outputFramebuffer`
         at the given viewport. */
@@ -116,6 +122,8 @@ private:
     gfx::Device dev;
     std::map<std::string, Program> programs;
     gfx::Shader *copyShader = nullptr, *downShader = nullptr, *upShader = nullptr, *presentShader = nullptr;
+    gfx::Shader *overlayShader = nullptr;
+    void drawSelection (int widgetIndex, int vx, int vy, int vw, int vh) noexcept;
     std::array<gfx::Shader*, (size_t) LayerType::count> layerShaders {};
 
     gfx::DataTexture spectrumTex, waveTex, waveHistoryTex, spectrumHistoryTex, noiseTex;
@@ -140,6 +148,11 @@ private:
     LayerChain globalChain;
     GLuint finalScene = 0;
     int loadedLook = -1;
+
+    // Scene crossfade: the last frame of the old scene, faded out over fadeSeconds.
+    gfx::RenderTarget fadeFrom;
+    float fadeSeconds = 0.0f, fadeElapsed = 0.0f, crossfadeBeats = 1.0f;
+    double lastBpm = 120.0;
 
     ModRouter router;
     std::array<float, 8> macros {};

@@ -24,11 +24,12 @@ namespace
         return spec;
     }
 
-    SceneSpec scene (const char* name, int background, std::vector<WidgetSpec> widgets, float bloom,
-                     Tonemap tonemap = Tonemap::film)
+    SceneSpec scene (const char* name, std::vector<std::string> tags, int background, std::vector<WidgetSpec> widgets,
+                     float bloom, Tonemap tonemap = Tonemap::film)
     {
         SceneSpec s;
         s.name = name;
+        s.tags = std::move (tags);
         s.backgroundPalette = background;
         s.widgets = std::move (widgets);
         s.bloom = bloom;
@@ -43,25 +44,25 @@ namespace
             std::vector<SceneSpec> v;
 
             // Bloom Orb: p0 rays, p1 flare
-            v.push_back (scene ("Pulse", cortexPal, { widget ("bloom_orb", cortexPal, { 0.6f, 0.8f }) }, 0.10f));
+            v.push_back (scene ("Pulse", { "Bloom Orb", "Calm", "Ambient" }, cortexPal, { widget ("bloom_orb", cortexPal, { 0.6f, 0.8f }) }, 0.10f));
 
             // Spectrum Bars: p0 layout (0 linear, 1 mirrored, 2 radial), p1 bar count, p2 gap
-            v.push_back (scene ("Spectrum", nightDrive, { widget ("spectrum_bars", nightDrive, { 1.0f, 0.55f, 0.35f }) }, 0.10f));
+            v.push_back (scene ("Spectrum", { "Spectrum Bars", "Clean", "Trap" }, nightDrive, { widget ("spectrum_bars", nightDrive, { 1.0f, 0.55f, 0.35f }) }, 0.10f));
 
             // Scope: p0 mode (0 time, 1 X/Y), p1 persistence, p2 gain
-            v.push_back (scene ("Phosphor", terminal, { widget ("scope", terminal, { 0.0f, 0.15f, 0.35f }) }, 0.14f));
+            v.push_back (scene ("Phosphor", { "Scope", "Retro", "Drill" }, terminal, { widget ("scope", terminal, { 0.0f, 0.15f, 0.35f }) }, 0.14f));
 
             // Waveform Stack: p0 gain
-            v.push_back (scene ("Strata", glacier, { widget ("waveform_stack", glacier, { 0.5f }) }, 0.10f));
+            v.push_back (scene ("Strata", { "Waveform Stack", "Clean", "Lo-fi" }, glacier, { widget ("waveform_stack", glacier, { 0.5f }) }, 0.10f));
 
             // Flowfield: p0 field scale, p1 flow speed, p2 trail length, p3 brightness
-            v.push_back (scene ("Drift", ultraviolet, { widget ("flowfield", ultraviolet, { 0.45f, 0.5f, 0.6f, 0.5f }) }, 0.12f));
+            v.push_back (scene ("Drift", { "Flowfield", "Dreamy", "R&B" }, ultraviolet, { widget ("flowfield", ultraviolet, { 0.45f, 0.5f, 0.6f, 0.5f }) }, 0.12f));
 
             // Pulse Grid: p0 rows, p1 base density
-            v.push_back (scene ("Signal", sodium, { widget ("pulse_grid", sodium, { 0.45f, 0.5f }) }, 0.12f));
+            v.push_back (scene ("Signal", { "Pulse Grid", "Hard", "Rage" }, sodium, { widget ("pulse_grid", sodium, { 0.45f, 0.5f }) }, 0.12f));
 
             // Three widgets: the Phase 2 performance case.
-            v.push_back (scene ("Undertow", deepSea,
+            v.push_back (scene ("Undertow", { "Flowfield", "Bloom Orb", "Spectrum Bars", "Dark", "Trap" }, deepSea,
                                 { widget ("flowfield", deepSea, { 0.35f, 0.4f, 0.7f, 0.35f }),
                                   widget ("bloom_orb", deepSea, { 0.5f, 0.6f }, 0.0f, 0.0f, 1.0f, 1.0f, BlendMode::add),
                                   widget ("spectrum_bars", deepSea, { 0.0f, 0.75f, 0.3f }, 0.0f, 0.62f, 1.0f, 0.38f, BlendMode::add) },

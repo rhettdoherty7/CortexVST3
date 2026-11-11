@@ -3,7 +3,8 @@ juce_add_console_app(cortex_tests PRODUCT_NAME "cortex_tests")
 target_sources(cortex_tests PRIVATE
     TestSignals.h
     AnalysisTests.cpp
-    EngineTests.cpp)
+    EngineTests.cpp
+    PresetTests.cpp)
 
 target_compile_definitions(cortex_tests PRIVATE
     JUCE_WEB_BROWSER=0
