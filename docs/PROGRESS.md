@@ -99,11 +99,19 @@ Started before the FL Studio checks of Phases 1 and 2, at Rhett's request (D-012
       Usable on any widget or on the whole scene
 - [x] Looks system, 8 factory Looks plus None, chosen by the Look parameter
 - [x] Cover-art palette: drop a PNG/JPG on the editor, k-means in OKLab, saved with the project
-- [ ] Final UI per section 10 (module rail with thumbnails, inspector, layer and route editing)
-- [ ] Preset browser (tags, favourites, search, A/B) and the `.cortex` preset format
-- [ ] Scene crossfade on scene changes
+- [x] Final UI per section 10: top bar (presets, previous/next, A/B, save, cover swatches, stats),
+      module rail with rendered thumbnails and the Looks, inspector (Widget / Effects / Motion / Audio
+      tabs: widget list, every widget and scene setting, per-widget effects, route editing, detector
+      and output parameters), bottom strip (onsets, bands, tempo with beat dots, macros), Tab for a
+      clean view. Embedded fonts, custom look and feel, no stock JUCE widgets
+- [x] Canvas editing: click selects (outlined with corner handles), drag moves with snapping, corners
+      resize, double-click fills the canvas
+- [x] Preset browser: search, tag chips, favourites, factory and user presets, Save As with tags,
+      delete to the Recycle Bin; `.cortex` format documented in docs/PRESET_FORMAT.md
+- [x] Scene crossfade, length in beats per scene; value-only edits apply live without resetting trails
+- [x] The scene is saved with the project as preset JSON (both A/B slots)
 - [ ] **Done when:** a non-technical user can pick a scene, drop cover art and get a good-looking result
-      in under 60 seconds. The pieces exist (scene picker, Look picker, cover drop); nobody has tried it.
+      in under 60 seconds. Everything for that flow is built; nobody has tried it yet.
 
 ### Measured on 2026-11-11 (Release build, Intel Arc integrated GPU)
 
@@ -113,6 +121,8 @@ Started before the FL Studio checks of Phases 1 and 2, at Rhett's request (D-012
 | pluginval strictness 10 | SUCCESS (now with MIDI input) |
 | Three widgets, no Look, 1080p | 5.9 to 6.4 ms GPU |
 | Three widgets with each Look, 1080p | 6.4 ms (2 layers) to 9.0 ms (VHS Tape, 5 layers); about 0.5 ms per layer |
+| Same scene on the RTX 4070 laptop GPU (2026-11-11, later run) | 1.4 ms with no Look, 1.7 ms worst (VHS Tape) |
+| Unit tests after the UI work | 41 test cases, 1,474 assertions, all pass |
 
 ### Known gaps
 
@@ -123,6 +133,12 @@ Started before the FL Studio checks of Phases 1 and 2, at Rhett's request (D-012
 - Riso Print and Glass from section 5.5 need Halftone and Glass layers, which are Phase 6.
 - Glitch mostly reacts to snares, so it can look idle on beats with few of them.
 - Cover art has only been checked with a generated test image, not real artwork.
+- The new interface has been seen as a still capture of the standalone at 1320 x 820. Only the Widget
+  tab was visible; the Effects, Motion and Audio tabs, the browser, the save form, dragging widgets and
+  HiDPI scaling have not been looked at or clicked through yet.
+- Preset thumbnails are still images of each module, not animated previews of each preset (Q4).
+- There is no undo. A/B is the safety net for now.
+- Keyboard shortcuts (Tab) only work while the Cortex window has focus; some hosts keep Tab for themselves.
 
 ## How to build
 

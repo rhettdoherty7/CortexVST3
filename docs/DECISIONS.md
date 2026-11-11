@@ -149,6 +149,30 @@ It replaces every widget's palette, except layers that fix their own (Night Visi
 Club Neon, VHS Tape, Night Vision, Blueprint, Mono Laser, Heat Map, Ghost Trails, Terminal. Riso Print
 and Glass need Halftone and Glass layers, which are Phase 6 work.
 
+## D-029: Fonts are Instrument Sans and JetBrains Mono, shared with Interlock
+Section 10 names Inter. Interlock already ships Instrument Sans (text), JetBrains Mono (numbers) and
+Unbounded (display), all SIL OFL, so Cortex embeds the same files: one typographic voice across the two
+products and no new download. See resources/fonts/README.md.
+
+## D-030: The processor owns the scene; the GL thread copies it on change
+The scene (with its Look and cover palette) is a `ScenePreset` held by the processor in two A/B slots
+behind a spin lock, with a version counter. The interface edits it on the message thread; the canvas
+copies it only when the version moves. Edits that keep the same widgets, modules and layer types are
+applied in place, so trails and particles carry on while a slider moves; anything else reloads with a
+crossfade. Scene select (automation, MIDI) still loads factory scenes, but only when that parameter
+actually changes, so restoring a project never overwrites its saved scene.
+
+## D-031: Nothing is drawn over the canvas
+The OpenGL canvas is a native child window on Windows, so ordinary components cannot draw on top of
+it. The selection outline is drawn by the renderer itself (editor-only, never in renders), the preset
+browser replaces the canvas while it is open (which also stops rendering), and errors show in the top
+bar instead of over the picture.
+
+## D-032: Module thumbnails are rendered by the engine and committed
+`cortex_snapshot --thumbs resources/thumbnails` renders each module alone at the moment a kick lands.
+The PNGs are committed and embedded, so the rail shows the real engine's output. Re-run it when a
+module's look changes.
+
 ## Open: JUCE licence
 JUCE 8 is dual-licensed (AGPLv3 or a commercial licence). Selling Cortex closed-source needs a JUCE
 commercial licence tier that matches RD Audio's revenue. Check before release.
