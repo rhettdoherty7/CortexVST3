@@ -20,6 +20,7 @@ include(Dependencies)
 include(Warnings)
 
 add_subdirectory(src)
+add_subdirectory(tools/snapshot)
 
 if(CORTEX_BUILD_TESTS)
     enable_testing()
