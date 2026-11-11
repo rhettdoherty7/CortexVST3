@@ -3,6 +3,7 @@
 #include <analysis/AnalysisEngine.h>
 #include <analysis/FrameFifo.h>
 #include <engine/Palette.h>
+#include <presets/PresetFormat.h>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -30,10 +31,38 @@ public:
     int  midiControllerFor (int slot) const noexcept;   // -1 when none
     void clearMidiController (int slot) noexcept;
 
-    // --- Cover-art palette (section 5.6). Message thread writes, GL thread reads. --------------
+    // --- The scene on screen (sections 5.1, 11) ------------------------------------------------
+    // Two slots for A/B comparison. The message thread edits; the GL thread copies the active slot
+    // whenever sceneVersion() changes. Saved with the project as preset JSON.
+
+    ScenePreset scene() const;
+    int sceneVersion() const noexcept   { return version.load (std::memory_order_acquire); }
+
+    /** Loads a preset into the active slot (and sets the Look parameter to match). */
+    void loadPreset (ScenePreset);
+
+    /** Changes the active slot in place. Marks the scene as modified. */
+    template <typename Fn>
+    void editScene (Fn&& fn)
+    {
+        {
+            const juce::SpinLock::ScopedLockType lock (sceneLock);
+            fn (slots[(size_t) active]);
+        }
+        modified[(size_t) active] = true;
+        version.fetch_add (1, std::memory_order_acq_rel);
+    }
+
+    int activeSlot() const noexcept     { return active; }
+    void selectSlot (int slot);
+    void copyActiveToOther();
+    bool isModified() const noexcept    { return modified[(size_t) active]; }
+    void markSaved (const juce::String& name);
+    void setLook (int look);   // the scene's Look and the Look parameter together
+
+    // Cover-art palette (section 5.6): part of the scene, so it travels with presets.
     void setCoverPalette (std::optional<Palette>);
-    std::optional<Palette> coverPalette() const;
-    int coverPaletteVersion() const noexcept   { return coverVersion.load (std::memory_order_acquire); }
+    std::optional<Palette> coverPalette() const   { return scene().cover; }
 
     CortexProcessor();
     ~CortexProcessor() override = default;
@@ -91,9 +120,15 @@ private:
     std::array<std::atomic<float>, numLearnSlots> pendingValue;
     std::array<std::atomic<bool>, numLearnSlots> pendingFlag;
 
-    mutable juce::SpinLock coverLock;
-    std::optional<Palette> cover;
-    std::atomic<int> coverVersion { 0 };
+    void syncLookFromParameter();
+    void setLookParameter (int look);
+
+    mutable juce::SpinLock sceneLock;
+    std::array<ScenePreset, 2> slots;
+    std::array<bool, 2> modified { false, false };
+    int active = 0;                       // message thread
+    std::atomic<int> version { 0 };
+    int lastSceneParam = 1, lastLookParam = 0;
 
     AnalysisEngine engine;
     SpscFifo<AnalysisFrame> frames { 64 };

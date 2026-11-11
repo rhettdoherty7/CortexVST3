@@ -30,6 +30,7 @@ CortexProcessor::CortexProcessor()
         pendingFlag[(size_t) i].store (false);
     }
 
+    slots[0] = slots[1] = factoryPreset (0);
     startTimerHz (30);
 }
 
@@ -86,6 +87,19 @@ juce::RangedAudioParameter* CortexProcessor::learnTarget (int slot) const
 
 void CortexProcessor::timerCallback()
 {
+    // Scene select (automation, MIDI learn) loads a factory scene. Look select changes the Look.
+    if (auto* sceneParam = apvts.getParameter (params::id::sceneSelect))
+    {
+        const int value = juce::roundToInt (sceneParam->convertFrom0to1 (sceneParam->getValue()));
+        if (value != lastSceneParam)
+        {
+            lastSceneParam = value;
+            if (value >= 1 && value <= numFactoryScenes())
+                loadPreset (factoryPreset (value - 1));
+        }
+    }
+    syncLookFromParameter();
+
     for (int slot = 0; slot < numLearnSlots; ++slot)
     {
         if (! pendingFlag[(size_t) slot].exchange (false, std::memory_order_acq_rel))
@@ -113,17 +127,84 @@ void CortexProcessor::timerCallback()
 
 void CortexProcessor::setCoverPalette (std::optional<Palette> palette)
 {
-    {
-        const juce::SpinLock::ScopedLockType lock (coverLock);
-        cover = palette;
-    }
-    coverVersion.fetch_add (1, std::memory_order_acq_rel);
+    editScene ([&palette] (ScenePreset& p) { p.cover = palette; });
 }
 
-std::optional<Palette> CortexProcessor::coverPalette() const
+// --- Scene ---------------------------------------------------------------------------------------
+
+ScenePreset CortexProcessor::scene() const
 {
-    const juce::SpinLock::ScopedLockType lock (coverLock);
-    return cover;
+    const juce::SpinLock::ScopedLockType lock (sceneLock);
+    return slots[(size_t) active];
+}
+
+void CortexProcessor::loadPreset (ScenePreset preset)
+{
+    const int look = preset.look;
+    {
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        slots[(size_t) active] = std::move (preset);
+    }
+    modified[(size_t) active] = false;
+    version.fetch_add (1, std::memory_order_acq_rel);
+    setLookParameter (look);
+}
+
+void CortexProcessor::selectSlot (int slot)
+{
+    if (slot == active || slot < 0 || slot > 1)
+        return;
+    {
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        active = slot;
+    }
+    version.fetch_add (1, std::memory_order_acq_rel);
+    setLookParameter (scene().look);
+}
+
+void CortexProcessor::copyActiveToOther()
+{
+    const juce::SpinLock::ScopedLockType lock (sceneLock);
+    slots[(size_t) (1 - active)] = slots[(size_t) active];
+    modified[(size_t) (1 - active)] = modified[(size_t) active];
+}
+
+void CortexProcessor::markSaved (const juce::String& name)
+{
+    editScene ([&name] (ScenePreset& p) { p.scene.name = name.toStdString(); });
+    modified[(size_t) active] = false;
+}
+
+void CortexProcessor::setLook (int look)
+{
+    look = juce::jlimit (0, numFactoryLooks() - 1, look);
+    editScene ([look] (ScenePreset& p) { p.look = look; });
+    setLookParameter (look);
+}
+
+void CortexProcessor::setLookParameter (int look)
+{
+    lastLookParam = look;
+    if (auto* param = apvts.getParameter (params::id::lookSelect))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 ((float) look));
+        param->endChangeGesture();
+    }
+}
+
+void CortexProcessor::syncLookFromParameter()
+{
+    auto* param = apvts.getParameter (params::id::lookSelect);
+    if (param == nullptr)
+        return;
+
+    const int value = juce::jlimit (0, numFactoryLooks() - 1, juce::roundToInt (param->convertFrom0to1 (param->getValue())));
+    if (value != lastLookParam)
+    {
+        lastLookParam = value;
+        editScene ([value] (ScenePreset& p) { p.look = value; });
+    }
 }
 
 void CortexProcessor::prepareToPlay (double sampleRate, int)
@@ -210,16 +291,16 @@ void CortexProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.removeChild (state.getChildWithName ("MidiLearn"), nullptr);
     state.appendChild (midiTree, nullptr);
 
-    state.removeChild (state.getChildWithName ("CoverPalette"), nullptr);
-    if (const auto palette = coverPalette())
+    // The scene itself, as preset JSON (section 11): both A/B slots and which one is showing.
+    state.removeChild (state.getChildWithName ("Scenes"), nullptr);
+    juce::ValueTree scenes ("Scenes");
     {
-        juce::StringArray hex;
-        for (auto c : palette->srgbHex)
-            hex.add (juce::String::toHexString ((int) c).paddedLeft ('0', 6));
-        juce::ValueTree coverTree ("CoverPalette");
-        coverTree.setProperty ("colours", hex.joinIntoString (" "), nullptr);
-        state.appendChild (coverTree, nullptr);
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        scenes.setProperty ("active", active, nullptr);
+        scenes.setProperty ("a", presetToJson (slots[0]), nullptr);
+        scenes.setProperty ("b", presetToJson (slots[1]), nullptr);
     }
+    state.appendChild (scenes, nullptr);
 
     if (const auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -237,20 +318,29 @@ void CortexProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (int slot = 0; slot < numLearnSlots; ++slot)
         midiMap[(size_t) slot].store ((int) midiTree.getProperty ("slot" + juce::String (slot), -1));
 
-    std::optional<Palette> palette;
-    const auto coverTree = state.getChildWithName ("CoverPalette");
-    const auto hex = juce::StringArray::fromTokens (coverTree.getProperty ("colours").toString(), " ", "");
-    if (hex.size() == 6)
-    {
-        Palette p;
-        p.name = "Cover Art";
-        for (int i = 0; i < 6; ++i)
-            p.srgbHex[(size_t) i] = (uint32_t) hex[i].getHexValue32();
-        palette = p;
-    }
-    setCoverPalette (palette);
-
     apvts.replaceState (state);
+
+    // Restore the scenes. The parameters were restored above; note their values so the timer does
+    // not mistake them for new changes and reload a factory scene over the saved one.
+    const auto scenes = state.getChildWithName ("Scenes");
+    {
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        juce::String error;
+        if (auto a = presetFromJson (scenes.getProperty ("a").toString(), error)) slots[0] = std::move (*a);
+        if (auto b = presetFromJson (scenes.getProperty ("b").toString(), error)) slots[1] = std::move (*b);
+        active = juce::jlimit (0, 1, (int) scenes.getProperty ("active", 0));
+        modified = { false, false };
+    }
+
+    if (auto* sceneParam = apvts.getParameter (params::id::sceneSelect))
+        lastSceneParam = juce::roundToInt (sceneParam->convertFrom0to1 (sceneParam->getValue()));
+    if (auto* lookParam = apvts.getParameter (params::id::lookSelect))
+    {
+        lastLookParam = juce::roundToInt (lookParam->convertFrom0to1 (lookParam->getValue()));
+        const juce::SpinLock::ScopedLockType lock (sceneLock);
+        slots[(size_t) active].look = lastLookParam;
+    }
+    version.fetch_add (1, std::memory_order_acq_rel);
 }
 
 } // namespace cortex

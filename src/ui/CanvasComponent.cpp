@@ -9,17 +9,17 @@ using namespace juce::gl;
 
 namespace
 {
-    // Behind the letterbox: the editor's panel colour (CLAUDE.md section 10), in sRGB.
+    // Behind the letterbox: the editor's background colour (CLAUDE.md section 10), in sRGB.
     constexpr float letterboxGrey = 0x0b / 255.0f;
+    constexpr float handleRadius = 9.0f;   // pixels around a corner that grab it for resizing
+    constexpr float minimumSize = 0.05f;   // smallest widget, as a fraction of the canvas
 }
 
 CanvasComponent::CanvasComponent (CortexProcessor& p) : processor (p)
 {
-    sceneParam     = processor.apvts.getRawParameterValue (params::id::sceneSelect);
     flashParam     = processor.apvts.getRawParameterValue (params::id::flashLimiter);
     intensityParam = processor.apvts.getRawParameterValue (params::id::intensity);
     freezeParam    = processor.apvts.getRawParameterValue (params::id::freeze);
-    lookParam      = processor.apvts.getRawParameterValue (params::id::lookSelect);
     for (int i = 0; i < 8; ++i)
         macroParams[(size_t) i] = processor.apvts.getRawParameterValue (params::id::macro (i));
 
@@ -76,6 +76,11 @@ void CanvasComponent::resized()
     heightPx.store (getHeight());
 }
 
+void CanvasComponent::setSelectedWidget (int index) noexcept
+{
+    selected.store (index);
+}
+
 CanvasComponent::Snapshot CanvasComponent::takeSnapshot()
 {
     const juce::SpinLock::ScopedLockType lock (snapshotLock);
@@ -83,6 +88,161 @@ CanvasComponent::Snapshot CanvasComponent::takeSnapshot()
     shared.kickHit = shared.snareHit = shared.hatHit = shared.gotFrame = false;
     return copy;
 }
+
+// --- Mouse ---------------------------------------------------------------------------------------
+
+juce::Rectangle<float> CanvasComponent::pictureBounds() const
+{
+    const auto area = getLocalBounds().toFloat();
+    float w = area.getWidth(), h = w * 9.0f / 16.0f;
+    if (h > area.getHeight())
+    {
+        h = area.getHeight();
+        w = h * 16.0f / 9.0f;
+    }
+    return juce::Rectangle<float> (w, h).withCentre (area.getCentre());
+}
+
+juce::Point<float> CanvasComponent::toCanvas (juce::Point<float> p) const
+{
+    const auto r = pictureBounds();
+    return { (p.x - r.getX()) / r.getWidth(), (p.y - r.getY()) / r.getHeight() };
+}
+
+int CanvasComponent::hitTest (juce::Point<float> c, const SceneSpec& scene) const
+{
+    for (int i = (int) scene.widgets.size() - 1; i >= 0; --i)   // topmost first
+    {
+        const auto& w = scene.widgets[(size_t) i];
+        if (juce::Rectangle<float> (w.x, w.y, w.w, w.h).contains (c))
+            return i;
+    }
+    return -1;
+}
+
+int CanvasComponent::cornerAt (juce::Point<float> p, const WidgetSpec& w) const
+{
+    const auto r = pictureBounds();
+    const juce::Point<float> corners[4] = {
+        { r.getX() + w.x * r.getWidth(),         r.getY() + w.y * r.getHeight() },
+        { r.getX() + (w.x + w.w) * r.getWidth(), r.getY() + w.y * r.getHeight() },
+        { r.getX() + w.x * r.getWidth(),         r.getY() + (w.y + w.h) * r.getHeight() },
+        { r.getX() + (w.x + w.w) * r.getWidth(), r.getY() + (w.y + w.h) * r.getHeight() },
+    };
+    for (int i = 0; i < 4; ++i)
+        if (corners[i].getDistanceFrom (p) <= handleRadius)
+            return i;
+    return -1;
+}
+
+void CanvasComponent::mouseMove (const juce::MouseEvent& e)
+{
+    const auto scene = processor.scene().scene;
+    const int index = selected.load();
+    if (index >= 0 && index < (int) scene.widgets.size())
+    {
+        const int corner = cornerAt (e.position, scene.widgets[(size_t) index]);
+        if (corner == 0 || corner == 3) { setMouseCursor (juce::MouseCursor::TopLeftCornerResizeCursor); return; }
+        if (corner == 1 || corner == 2) { setMouseCursor (juce::MouseCursor::TopRightCornerResizeCursor); return; }
+    }
+    setMouseCursor (hitTest (toCanvas (e.position), scene) >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                                 : juce::MouseCursor::NormalCursor);
+}
+
+void CanvasComponent::mouseDown (const juce::MouseEvent& e)
+{
+    const auto scene = processor.scene().scene;
+    drag = Drag::none;
+    dragStartPoint = toCanvas (e.position);
+
+    int index = selected.load();
+    if (index >= 0 && index < (int) scene.widgets.size())
+    {
+        dragCorner = cornerAt (e.position, scene.widgets[(size_t) index]);
+        if (dragCorner >= 0)
+            drag = Drag::resize;
+    }
+
+    if (drag == Drag::none)
+    {
+        index = hitTest (dragStartPoint, scene);
+        if (index >= 0)
+            drag = Drag::move;
+    }
+
+    if (index >= 0 && index < (int) scene.widgets.size())
+    {
+        const auto& w = scene.widgets[(size_t) index];
+        dragStartRect = { w.x, w.y, w.w, w.h };
+    }
+
+    if (index != selected.load())
+    {
+        selected.store (index);
+        if (onSelectionChanged != nullptr)
+            onSelectionChanged (index);
+    }
+}
+
+void CanvasComponent::mouseDrag (const juce::MouseEvent& e)
+{
+    const int index = selected.load();
+    if (drag == Drag::none || index < 0)
+        return;
+
+    const auto delta = toCanvas (e.position) - dragStartPoint;
+    auto r = dragStartRect;
+
+    if (drag == Drag::move)
+    {
+        r.setPosition (juce::jlimit (0.0f, 1.0f - r.getWidth(), r.getX() + delta.x),
+                       juce::jlimit (0.0f, 1.0f - r.getHeight(), r.getY() + delta.y));
+    }
+    else
+    {
+        float left = r.getX(), top = r.getY(), right = r.getRight(), bottom = r.getBottom();
+        if (dragCorner == 0 || dragCorner == 2) left   = juce::jlimit (0.0f, right - minimumSize, left + delta.x);
+        else                                    right  = juce::jlimit (left + minimumSize, 1.0f, right + delta.x);
+        if (dragCorner == 0 || dragCorner == 1) top    = juce::jlimit (0.0f, bottom - minimumSize, top + delta.y);
+        else                                    bottom = juce::jlimit (top + minimumSize, 1.0f, bottom + delta.y);
+        r = { left, top, right - left, bottom - top };
+    }
+
+    // Snap edges to the canvas edges and centre lines when close, so layouts line up.
+    const auto snap = [] (float v) { for (float s : { 0.0f, 0.5f, 1.0f }) if (std::abs (v - s) < 0.012f) return s; return v; };
+    if (drag == Drag::move)
+        r.setPosition (snap (r.getX()), snap (r.getY()));
+
+    processor.editScene ([index, r] (ScenePreset& p)
+    {
+        if (index < (int) p.scene.widgets.size())
+        {
+            auto& w = p.scene.widgets[(size_t) index];
+            w.x = r.getX(); w.y = r.getY(); w.w = r.getWidth(); w.h = r.getHeight();
+        }
+    });
+}
+
+void CanvasComponent::mouseUp (const juce::MouseEvent&)
+{
+    drag = Drag::none;
+}
+
+void CanvasComponent::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int index = hitTest (toCanvas (e.position), processor.scene().scene);
+    if (index < 0)
+        return;
+
+    processor.editScene ([index] (ScenePreset& p)
+    {
+        auto& w = p.scene.widgets[(size_t) index];
+        w.x = w.y = 0.0f;
+        w.w = w.h = 1.0f;
+    });
+}
+
+// --- GL thread -----------------------------------------------------------------------------------
 
 void CanvasComponent::newOpenGLContextCreated()
 {
@@ -94,7 +254,8 @@ void CanvasComponent::newOpenGLContextCreated()
         shared.error = ok ? juce::String() : juce::String ("Visual engine failed to start:\n") + log;
     }
 
-    loadedScene = -1;
+    sceneVersionSeen = -1;
+    sceneLoadedOnce = false;
     lastTime = 0.0;
     rendering.store (ok, std::memory_order_release);
 }
@@ -142,14 +303,17 @@ void CanvasComponent::renderOpenGL()
     if (frozen)
         inputs.dt = 0.0f;
 
-    // --- Scene -----------------------------------------------------------------------------------
+    // --- Scene: take edits as they happen ---------------------------------------------------------
     std::string error;
-    const int scene = juce::jlimit (0, numFactoryScenes() - 1, juce::roundToInt (sceneParam->load()) - 1);
-    if (scene != loadedScene)
+    if (const int version = processor.sceneVersion(); version != sceneVersionSeen)
     {
-        if (! renderer.loadScene (factoryScene (scene), error))
+        sceneVersionSeen = version;
+        const auto preset = processor.scene();   // copies, only when something changed
+        if (! renderer.applyScene (preset.scene, error, sceneLoadedOnce))
             error = "Scene failed to load:\n" + error;
-        loadedScene = scene;
+        sceneLoadedOnce = true;
+        look = preset.look;
+        cover = preset.cover;
     }
 
    #if JUCE_DEBUG
@@ -183,19 +347,14 @@ void CanvasComponent::renderOpenGL()
         vw = juce::roundToInt (h * 16.0 / 9.0);
     }
 
-    if (const int version = processor.coverPaletteVersion(); version != coverVersionSeen)
-    {
-        coverVersionSeen = version;
-        cover = processor.coverPalette();
-    }
-
     FrameSettings settings;
     settings.flashMode = (FlashLimiter::Mode) juce::jlimit (0, 2, juce::roundToInt (flashParam->load()));
     settings.masterIntensity = intensityParam->load();
-    settings.look = juce::jlimit (0, numFactoryLooks() - 1, juce::roundToInt (lookParam->load()));
+    settings.look = juce::jlimit (0, numFactoryLooks() - 1, look);
     for (size_t i = 0; i < 8; ++i)
         settings.macros[i] = macroParams[i]->load (std::memory_order_relaxed);
     settings.paletteOverride = cover ? &*cover : nullptr;
+    settings.selectedWidget = selected.load();
 
     renderer.render (inputs, vw, vh, (GLuint) framebuffer, (w - vw) / 2, (h - vh) / 2, vw, vh, settings);
 
