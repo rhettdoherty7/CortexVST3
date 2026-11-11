@@ -10,6 +10,7 @@
 
 #include <analysis/AnalysisEngine.h>
 #include <engine/Renderer.h>
+#include <presets/CoverArtPalette.h>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_opengl/juce_opengl.h>
@@ -26,6 +27,7 @@ struct Options
     juce::File outDir = juce::File::getCurrentWorkingDirectory().getChildFile ("snapshots");
     int width = 1920, height = 1080;
     int timingFrames = 240;
+    juce::File cover;   // --cover <image>: also render scenes with the palette taken from it
 };
 
 Options parse (const juce::StringArray& args)
@@ -42,6 +44,8 @@ Options parse (const juce::StringArray& args)
         }
         else if (args[i] == "--frames" && i + 1 < args.size())
             o.timingFrames = args[++i].getIntValue();
+        else if (args[i] == "--cover" && i + 1 < args.size())
+            o.cover = juce::File::getCurrentWorkingDirectory().getChildFile (args[++i].unquoted());
     }
     return o;
 }
@@ -195,7 +199,85 @@ private:
                          counted > 0 ? sum / (float) counted : 0.0f, options.width, options.height);
         }
 
-        writeSheet (sheet);
+        writeSheet (sheet, "contact_sheet.png");
+
+        // Every Look on the three-widget scene.
+        juce::Array<juce::Image> lookSheet;
+        const int lookScene = cortex::numFactoryScenes() - 1;
+        for (int look = 0; look < cortex::numFactoryLooks(); ++look)
+        {
+            log.clear();
+            renderer.loadScene (cortex::factoryScene (lookScene), log);
+            frameSettings = {};
+            frameSettings.look = look;
+            const auto image = captureAt (renderer, track, kickTime);
+            write (image, "look_" + juce::String (look).paddedLeft ('0', 2) + "_"
+                          + juce::String (cortex::factoryLook (look).name).toLowerCase().replaceCharacter (' ', '_') + ".png");
+            lookSheet.add (image);
+
+            // Keep rendering the same moment to time this Look on the three-widget scene.
+            cortex::FrameInterpolator hold;
+            float sum = 0.0f;
+            int counted = 0;
+            for (int frame = 0; frame < options.timingFrames; ++frame)
+            {
+                renderFrame (renderer, hold.update (1.0f / 60.0f));
+                if (frame >= 30) { sum += renderer.stats().gpuMs; ++counted; }
+            }
+            std::printf ("look %-13s %d layer(s)  GPU %.2f ms at %dx%d\n", cortex::factoryLook (look).name,
+                         (int) cortex::factoryLook (look).layers.size(), counted > 0 ? sum / (float) counted : 0.0f,
+                         options.width, options.height);
+        }
+        writeSheet (lookSheet, "looks_sheet.png");
+
+        // The macros, one at a time at full, on the same scene.
+        juce::Array<juce::Image> macroSheet;
+        for (int m = 0; m < 8; ++m)
+        {
+            log.clear();
+            renderer.loadScene (cortex::factoryScene (lookScene), log);
+            frameSettings = {};
+            frameSettings.macros[(size_t) m] = 1.0f;
+            const auto image = captureAt (renderer, track, kickTime);
+            write (image, "macro_" + juce::String (m + 1) + "_" + juce::String (cortex::macroLabel (m)).toLowerCase() + ".png");
+            macroSheet.add (image);
+        }
+        writeSheet (macroSheet, "macros_sheet.png");
+        frameSettings = {};
+
+        // Cover art: the same extraction the editor uses, applied to every scene.
+        if (options.cover.existsAsFile())
+        {
+            const auto image = juce::ImageFileFormat::loadFrom (options.cover);
+            const auto small = image.rescaled (96, 96, juce::Graphics::mediumResamplingQuality);
+            std::vector<cortex::Rgb> pixels;
+            for (int y = 0; y < small.getHeight(); ++y)
+                for (int x = 0; x < small.getWidth(); ++x)
+                {
+                    const auto c = small.getPixelAt (x, y);
+                    pixels.push_back ({ c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue() });
+                }
+            const auto palette = cortex::paletteFromPixels (pixels);
+
+            std::printf ("cover palette:");
+            for (auto hex : palette.srgbHex)
+                std::printf (" #%06X", (unsigned) hex);
+            std::printf ("\n");
+
+            juce::Array<juce::Image> coverSheet;
+            coverSheet.add (image.rescaled (options.width, options.height));
+            for (int sc = 0; sc < cortex::numFactoryScenes(); ++sc)
+            {
+                log.clear();
+                renderer.loadScene (cortex::factoryScene (sc), log);
+                frameSettings = {};
+                frameSettings.paletteOverride = &palette;
+                coverSheet.add (captureAt (renderer, track, kickTime));
+            }
+            writeSheet (coverSheet, "cover_sheet.png");
+            frameSettings = {};
+        }
+
         renderer.shutdown();
         output.release();
         std::printf ("wrote %s\n", options.outDir.getFullPathName().toRawUTF8());
@@ -205,7 +287,7 @@ private:
     /** Renders one frame into our own 8-bit target rather than the tiny window. */
     void renderFrame (cortex::Renderer& renderer, const cortex::RenderInputs& inputs)
     {
-        cortex::FrameSettings settings;
+        cortex::FrameSettings settings = frameSettings;
         settings.exact = true;
 
         GLint fbo = 0;
@@ -242,7 +324,25 @@ private:
         juce::PNGImageFormat().writeImageToStream (image, stream);
     }
 
-    void writeSheet (const juce::Array<juce::Image>& images)
+    /** Plays the track from the start and returns the frame just after `kickTime`. */
+    juce::Image captureAt (cortex::Renderer& renderer, const Track& track, double kickTime)
+    {
+        cortex::FrameInterpolator interpolator;
+        size_t nextFrame = 0;
+        const double fps = 60.0;
+        const int totalFrames = (int) std::ceil (kickTime * fps) + 1;
+
+        for (int frame = 0; frame <= totalFrames; ++frame)
+        {
+            const double t = frame / fps;
+            while (nextFrame < track.frames.size() && (double) track.frames[nextFrame].samplePos / 48000.0 <= t)
+                interpolator.push (track.frames[nextFrame++]);
+            renderFrame (renderer, interpolator.update ((float) (1.0 / fps)));
+        }
+        return readOutput();
+    }
+
+    void writeSheet (const juce::Array<juce::Image>& images, const juce::String& name)
     {
         if (images.isEmpty())
             return;
@@ -255,10 +355,11 @@ private:
         g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
         for (int i = 0; i < images.size(); ++i)
             g.drawImage (images[i], juce::Rectangle<float> ((float) ((i % columns) * cellW), (float) ((i / columns) * cellH), (float) cellW, (float) cellH));
-        write (sheet, "contact_sheet.png");
+        write (sheet, name);
     }
 
     Options options;
+    cortex::FrameSettings frameSettings;
     juce::OpenGLContext context;
     cortex::gfx::RenderTarget output;
     bool finished = false;
