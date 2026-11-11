@@ -59,6 +59,63 @@ Company "RD Audio" (from section 16), manufacturer code `Rdau`, plugin code `Crt
 `com.rdaudio.cortex`, VST3 category Fx / Analyzer. No MIDI input yet: it gets switched on in Phase 3
 with MIDI learn.
 
+## D-012: Phase 2 started before Phase 1's FL Studio check
+Section 0 says not to start a phase until the previous one loads in FL Studio and passes its checklist.
+Rhett asked for the visual work to start anyway. Phase 1's "done when" is still open in PROGRESS.md.
+
+## D-013: Geometry comes from the vertex shader
+There are no vertex buffers. Fullscreen passes use one triangle from `gl_VertexID`; lines are instanced
+quads that fetch their endpoints from the wave textures; particles are points that read the simulation
+texture. Less code, nothing to upload per frame.
+
+## D-014: Additions to the shared uniform contract
+Section 1.5's contract is kept. Added: `uPaletteLab[6]` (the palette in OKLab, so shaders can mix in
+OKLab cheaply), `uSinceKick / uSinceSnare / uSinceHat`, `uKickCount / uSnareCount / uHatCount`,
+`uMotion` (time that runs faster when the music is louder), `uWaveHistory`, `uSpectrumHistory`
+(64 rows, eight per beat) and `uHistoryPhase`. Module parameters are the array `uP[16]` rather than
+sixteen separate names. Everything is declared once in `shaders/common.glsl`.
+
+## D-015: Module interface differs from section 5.2
+`update()` and `render()` are one call, parameters arrive as `WidgetSettings` each frame, and shaders
+come from a cache in the renderer that every widget shares. One module object per widget, so a module
+can keep its own trails or particles. `declareParams` waits for the Phase 3 inspector.
+
+## D-016: Web lab (Phase 0) skipped for now
+The modules were written directly in GLSL 410 and judged with the `cortex_snapshot` tool, which renders
+the real engine to PNG. That removes the port step the lab exists to de-risk. The lab is still useful
+for quick iteration in a browser and as the future Cortex Web demo.
+
+## D-017: Analytic anti-aliasing instead of MSAA for lines
+North Star Q1 asks for MSAA 4x on line modules. Scope and Waveform Stack draw each segment as a capsule
+whose edge coverage is computed in the shader, with a soft glow, blended with MAX so joints have no
+bright beads. Clean edges without multisample targets. MSAA can still be added if needed.
+
+## D-018: Particles run as a fragment-shader simulation
+North Star Q1 asks for compute shaders (SSBO). OpenGL 4.1 on macOS has no compute, so the 102,400
+Flowfield particles live in an RGBA32F texture updated by a fragment shader each frame and drawn as
+points. Same GPU-only result, works on every target.
+
+## D-019: The editor renders at about 60 fps, not every refresh
+On this machine's 240 Hz display the canvas rendered at 240 fps and used about 80% of the integrated
+GPU. It now renders every Nth refresh with N = floor(refresh / 60): 60 fps at 60, 120 and 240 Hz,
+72 at 144 Hz, 82 at 165 Hz. Always at least 60 and always an even cadence, so no judder.
+A user setting for higher frame rates can come later.
+
+## D-020: The live flash limiter is one or two frames late
+The limiter needs the displayed picture's luminance back on the CPU. Waiting for it would stall the GPU
+(North Star Q3), so the live editor reads it through a ring of three pixel buffers and uses whatever has
+finished. A flash can therefore show for one or two frames (up to about 33 ms) before it is held.
+Offline renders wait for the result and are exact. Measurement uses a 4 x 4 grid; a flash must cover a
+quarter of the picture, as WCAG defines it.
+
+## D-021: Default scope mode is time, not X/Y
+X/Y mode draws mono content as a single vertical line, and most beats have a mono kick and 808, so the
+factory "Phosphor" scene uses the triggered time-domain trace. X/Y stays available.
+
+## D-022: Tone maps
+Film = AgX (fitted), Punchy = ACES fitted (Hill), Neutral = Khronos PBR Neutral. Each scene picks one;
+all factory scenes use Film for now.
+
 ## Open: JUCE licence
 JUCE 8 is dual-licensed (AGPLv3 or a commercial licence). Selling Cortex closed-source needs a JUCE
 commercial licence tier that matches RD Audio's revenue. Check before release.
