@@ -17,6 +17,46 @@ target_sources(cortex_analysis INTERFACE
 target_include_directories(cortex_analysis INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cortex_analysis INTERFACE juce::juce_dsp)
 
+# --- Engine core (no OpenGL; unit tested) ----------------------------------------------------
+
+add_library(cortex_engine_core INTERFACE)
+target_sources(cortex_engine_core INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Palette.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Palette.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/FrameInterpolator.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/FrameInterpolator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Scene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Scene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/safety/FlashLimiter.cpp)
+target_link_libraries(cortex_engine_core INTERFACE cortex_analysis)
+
+# --- Shaders, embedded as binary data ---------------------------------------------------------
+
+file(GLOB CORTEX_SHADER_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/shaders/*.glsl)
+juce_add_binary_data(cortex_shaders
+    HEADER_NAME CortexShaders.h
+    NAMESPACE   CortexShaders
+    SOURCES     ${CORTEX_SHADER_FILES})
+
+# --- Render engine and modules (OpenGL 4.1) ---------------------------------------------------
+
+add_library(cortex_render INTERFACE)
+target_sources(cortex_render INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/gfx/Device.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/gfx/Device.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Renderer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/Renderer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/Module.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/ModuleRegistry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/FullscreenModules.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/PulseGrid.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/LineModules.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/Flowfield.cpp)
+# Debug builds read shaders straight from the source folder so edits show up live.
+target_compile_definitions(cortex_render INTERFACE CORTEX_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
+target_link_libraries(cortex_render INTERFACE cortex_engine_core cortex_shaders juce::juce_opengl)
+
 # --- Plugin ------------------------------------------------------------------------------------
 
 set(CORTEX_FORMATS VST3 Standalone)
@@ -49,7 +89,9 @@ target_sources(Cortex PRIVATE
     core/PluginProcessor.h
     core/PluginProcessor.cpp
     core/PluginEditor.h
-    core/PluginEditor.cpp)
+    core/PluginEditor.cpp
+    ui/CanvasComponent.h
+    ui/CanvasComponent.cpp)
 
 target_compile_definitions(Cortex PUBLIC
     JUCE_WEB_BROWSER=0
@@ -62,8 +104,10 @@ target_compile_definitions(Cortex PUBLIC
 target_link_libraries(Cortex
     PRIVATE
         cortex_analysis
+        cortex_render
         cortex_warnings
         juce::juce_audio_utils
+        juce::juce_opengl
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
